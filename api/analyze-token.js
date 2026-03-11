@@ -102,11 +102,12 @@ export default async function handler(req, res) {
     let riskScore = 0
     const riskSignals = []
 
-    const addRisk = (points, title, description) => {
+    const addRisk = (key, points, title, description) => {
 
       riskScore += points
 
       riskSignals.push({
+        key,
         title,
         description,
         severity:
@@ -121,48 +122,88 @@ export default async function handler(req, res) {
     // -----------------------------
 
     if (honeypot)
-      addRisk(80, "Honeypot detected",
-      "Selling may be restricted")
+      addRisk(
+        "honeypot",
+        80,
+        "Honeypot detected",
+        "This token may allow buying but restrict selling."
+      )
 
     if (hiddenOwner)
-      addRisk(40, "Hidden owner",
-      "Developer may retain hidden control")
+      addRisk(
+        "hiddenOwner",
+        40,
+        "Hidden owner detected",
+        "Developer may retain hidden contract control."
+      )
 
     if (ownerChangeBalance)
-      addRisk(35, "Owner can change balances",
-      "Token balances may be manipulated")
+      addRisk(
+        "ownerChangeBalance",
+        35,
+        "Owner can change balances",
+        "Token balances may be manipulated."
+      )
 
     if (blacklist)
-      addRisk(30, "Blacklist capability",
-      "Wallets may be blocked from trading")
+      addRisk(
+        "blacklist",
+        30,
+        "Blacklist capability",
+        "Wallets may be blocked from trading."
+      )
 
     if (mintable)
-      addRisk(20, "Mint function enabled",
-      "New tokens can be created")
+      addRisk(
+        "mintable",
+        20,
+        "Mint function enabled",
+        "New tokens can be created by the contract."
+      )
 
     if (transferPausable)
-      addRisk(20, "Transfers can be paused",
-      "Trading may be frozen")
+      addRisk(
+        "transferPause",
+        20,
+        "Transfers can be paused",
+        "Trading may be frozen by the owner."
+      )
 
     if (proxyContract)
-      addRisk(10, "Upgradeable proxy contract",
-      "Contract logic may change")
+      addRisk(
+        "proxyContract",
+        10,
+        "Upgradeable proxy contract",
+        "Contract logic may be upgraded."
+      )
 
     // -----------------------------
     // Tokenomics Risk
     // -----------------------------
 
     if (sellTax > 20)
-      addRisk(40, "Extreme sell tax",
-      "Selling may be very expensive")
+      addRisk(
+        "extremeSellTax",
+        40,
+        "Extreme sell tax",
+        "Selling the token may incur heavy losses."
+      )
 
     else if (sellTax > 10)
-      addRisk(20, "High sell tax",
-      "Selling costs are high")
+      addRisk(
+        "highSellTax",
+        20,
+        "High sell tax",
+        "Selling may be expensive."
+      )
 
     if (buyTax > 10)
-      addRisk(10, "High buy tax",
-      "Buying costs are elevated")
+      addRisk(
+        "highBuyTax",
+        10,
+        "High buy tax",
+        "Buying the token may incur extra costs."
+      )
 
     // -----------------------------
     // Liquidity Risk
@@ -174,35 +215,59 @@ export default async function handler(req, res) {
       liquidityRatio = liquidityUSD / marketCap
 
     if (liquidityUSD < 25000)
-      addRisk(30, "Very low liquidity",
-      "Liquidity pool is small")
+      addRisk(
+        "lowLiquidity",
+        30,
+        "Very low liquidity",
+        "Liquidity pool is small and may cause volatility."
+      )
 
     if (liquidityRatio < 0.01)
-      addRisk(30, "Extremely low liquidity ratio",
-      "Liquidity relative to market cap is very low")
+      addRisk(
+        "extremeLiquidityRisk",
+        30,
+        "Extremely low liquidity ratio",
+        "Liquidity relative to market cap is extremely low."
+      )
 
     else if (liquidityRatio < 0.03)
-      addRisk(15, "Low liquidity ratio",
-      "Liquidity relative to market cap is limited")
+      addRisk(
+        "lowLiquidityRatio",
+        15,
+        "Low liquidity ratio",
+        "Liquidity relative to market cap is limited."
+      )
 
     // -----------------------------
-    // Dangerous Signal Patterns
+    // Dangerous Patterns
     // -----------------------------
 
     if (mintable && !ownerRenounced)
-      addRisk(25, "Mint rug risk",
-      "Owner can mint unlimited tokens")
+      addRisk(
+        "mintRugRisk",
+        25,
+        "Mint rug risk",
+        "Owner can mint unlimited tokens."
+      )
 
     if (proxyContract && !ownerRenounced)
-      addRisk(20, "Upgradeable ownership risk",
-      "Owner may upgrade contract logic")
+      addRisk(
+        "upgradeRisk",
+        20,
+        "Upgradeable ownership risk",
+        "Owner may upgrade contract logic."
+      )
 
     if (transferPausable && blacklist)
-      addRisk(30, "Trading restriction risk",
-      "Transfers or trading may be restricted")
+      addRisk(
+        "tradingRestriction",
+        30,
+        "Trading restriction risk",
+        "Transfers may be frozen or blocked."
+      )
 
     // -----------------------------
-    // Cap Risk
+    // Cap Score
     // -----------------------------
 
     if (riskScore > 100)
@@ -227,7 +292,7 @@ export default async function handler(req, res) {
       riskLevel = "Low Risk"
 
     // -----------------------------
-    // Trade Safety Verdict
+    // Trade Verdict
     // -----------------------------
 
     let tradeSafety = "Safe"
@@ -248,9 +313,9 @@ export default async function handler(req, res) {
       tokenSymbol,
       tokenAddress: normalizedAddress,
 
+      tradeSafety,
       riskScore,
       riskLevel,
-      tradeSafety,
 
       riskSignals,
 
@@ -286,4 +351,5 @@ export default async function handler(req, res) {
     })
 
   }
+
 }
