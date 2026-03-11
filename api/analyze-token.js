@@ -22,11 +22,13 @@ export default async function handler(req, res) {
 
     const normalizedAddress = address.toLowerCase()
 
+    const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
+
     // --------------------------------
     // Fetch APIs
     // --------------------------------
 
-    const [goplusRes, dexRes] = await Promise.all([
+    const [goplusRes, dexRes, creationRes] = await Promise.all([
 
       fetch(
         `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${normalizedAddress}`
@@ -34,12 +36,17 @@ export default async function handler(req, res) {
 
       fetch(
         `https://api.dexscreener.com/latest/dex/tokens/${normalizedAddress}`
+      ),
+
+      fetch(
+        `https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${normalizedAddress}&apikey=${ETHERSCAN_API_KEY}`
       )
 
     ])
 
     const goplus = await goplusRes.json()
     const dex = await dexRes.json()
+    const creation = await creationRes.json()
 
     const security = goplus?.result?.[normalizedAddress] || {}
     const pair = dex?.pairs?.[0] || {}
@@ -90,6 +97,22 @@ export default async function handler(req, res) {
       "0x0000000000000000000000000000000000000000"
 
     // --------------------------------
+    // Contract Age
+    // --------------------------------
+
+    let contractAgeDays = null
+
+    if (creation?.result?.[0]?.timestamp) {
+
+      const creationTime = Number(creation.result[0].timestamp) * 1000
+      const now = Date.now()
+
+      contractAgeDays =
+        (now - creationTime) / (1000 * 60 * 60 * 24)
+
+    }
+
+    // --------------------------------
     // Calculated Metrics
     // --------------------------------
 
@@ -122,6 +145,30 @@ export default async function handler(req, res) {
           points >= 15 ? "medium" :
           "low"
       })
+    }
+
+    // --------------------------------
+    // Contract Age Risk
+    // --------------------------------
+
+    if (contractAgeDays !== null) {
+
+      if (contractAgeDays < 1)
+        addRisk(
+          "veryNewContract",
+          40,
+          "Very new contract",
+          "Token contract was created less than 24 hours ago."
+        )
+
+      else if (contractAgeDays < 7)
+        addRisk(
+          "newContract",
+          20,
+          "New contract",
+          "Token contract is less than 7 days old."
+        )
+
     }
 
     // --------------------------------
@@ -165,7 +212,7 @@ export default async function handler(req, res) {
         "proxyContract",
         10,
         "Upgradeable contract",
-        "Logic may be changed later."
+        "Logic may change."
       )
 
     if (!ownerRenounced)
@@ -173,7 +220,7 @@ export default async function handler(req, res) {
         "ownerActive",
         15,
         "Owner still active",
-        "Developer retains contract control."
+        "Developer retains control."
       )
 
     // --------------------------------
@@ -185,7 +232,7 @@ export default async function handler(req, res) {
         "lowLiquidity",
         30,
         "Low liquidity",
-        "Price may be manipulated easily."
+        "Price manipulation possible."
       )
 
     if (liquidityRatio < 0.01)
@@ -193,7 +240,7 @@ export default async function handler(req, res) {
         "extremeLiquidityRatio",
         30,
         "Extremely low liquidity ratio",
-        "Liquidity compared to market cap is extremely low."
+        "Liquidity relative to market cap is extremely low."
       )
 
     else if (liquidityRatio < 0.03)
@@ -233,7 +280,7 @@ export default async function handler(req, res) {
         "extremeSellTax",
         40,
         "Extreme sell tax",
-        "Selling may incur heavy losses."
+        "Selling heavily penalized."
       )
 
     else if (sellTax > 10)
@@ -241,7 +288,7 @@ export default async function handler(req, res) {
         "highSellTax",
         20,
         "High sell tax",
-        "Selling is expensive."
+        "Selling expensive."
       )
 
     if (buyTax > 10)
@@ -251,10 +298,6 @@ export default async function handler(req, res) {
         "High buy tax",
         "Buying incurs additional cost."
       )
-
-    // --------------------------------
-    // Clamp Score
-    // --------------------------------
 
     if (riskScore > 100)
       riskScore = 100
@@ -286,6 +329,8 @@ export default async function handler(req, res) {
 
       riskScore,
       riskLevel,
+
+      contractAgeDays,
 
       riskSignals,
 
