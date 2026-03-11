@@ -22,13 +22,11 @@ export default async function handler(req, res) {
 
     const normalizedAddress = address.toLowerCase()
 
-    const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
-
-    // -----------------------------
+    // --------------------------------
     // Fetch APIs
-    // -----------------------------
+    // --------------------------------
 
-    const [goplusRes, dexRes, holderRes] = await Promise.all([
+    const [goplusRes, dexRes] = await Promise.all([
 
       fetch(
         `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${normalizedAddress}`
@@ -36,26 +34,19 @@ export default async function handler(req, res) {
 
       fetch(
         `https://api.dexscreener.com/latest/dex/tokens/${normalizedAddress}`
-      ),
-
-      fetch(
-        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${normalizedAddress}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`
       )
 
     ])
 
     const goplus = await goplusRes.json()
     const dex = await dexRes.json()
-    const holderData = await holderRes.json()
 
     const security = goplus?.result?.[normalizedAddress] || {}
     const pair = dex?.pairs?.[0] || {}
 
-    const holders = holderData?.result || []
-
-    // -----------------------------
+    // --------------------------------
     // Metadata
-    // -----------------------------
+    // --------------------------------
 
     const tokenName =
       pair?.baseToken?.name ||
@@ -66,26 +57,31 @@ export default async function handler(req, res) {
       pair?.baseToken?.symbol ||
       ""
 
+    // --------------------------------
+    // Market Data
+    // --------------------------------
+
     const liquidityUSD = Number(pair?.liquidity?.usd || 0)
     const marketCap = Number(pair?.fdv || 0)
+    const price = Number(pair?.priceUsd || 0)
+    const volume24h = Number(pair?.volume?.h24 || 0)
+
+    // --------------------------------
+    // Tokenomics
+    // --------------------------------
 
     const buyTax = Number(security.buy_tax || 0)
     const sellTax = Number(security.sell_tax || 0)
 
-    const price = Number(pair?.priceUsd || 0)
-    const volume24h = Number(pair?.volume?.h24 || 0)
-
-    // -----------------------------
+    // --------------------------------
     // Security Flags
-    // -----------------------------
+    // --------------------------------
 
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
     const blacklist = security.is_blacklisted === "1"
     const proxyContract = security.is_proxy === "1"
-
-    const transferPausable =
-      security.transfer_pausable === "1"
+    const transferPausable = security.transfer_pausable === "1"
 
     const ownerAddress = security.owner_address || ""
 
@@ -93,34 +89,22 @@ export default async function handler(req, res) {
       ownerAddress ===
       "0x0000000000000000000000000000000000000000"
 
-    // -----------------------------
-    // Holder Distribution
-    // -----------------------------
+    // --------------------------------
+    // Calculated Metrics
+    // --------------------------------
 
-    let top10Percent = 0
-    let whaleRisk = false
+    let liquidityRatio = 0
+    let volumePressure = 0
 
-    if (holders.length > 0) {
+    if (marketCap > 0)
+      liquidityRatio = liquidityUSD / marketCap
 
-      const totalSupply = holders.reduce(
-        (sum, h) => sum + Number(h.TokenHolderQuantity),
-        0
-      )
+    if (liquidityUSD > 0)
+      volumePressure = volume24h / liquidityUSD
 
-      const top10Supply = holders.reduce(
-        (sum, h) => sum + Number(h.TokenHolderQuantity),
-        0
-      )
-
-      top10Percent = (top10Supply / totalSupply) * 100
-
-      if (top10Percent > 60)
-        whaleRisk = true
-    }
-
-    // -----------------------------
+    // --------------------------------
     // Risk Engine
-    // -----------------------------
+    // --------------------------------
 
     let riskScore = 0
     const riskSignals = []
@@ -140,12 +124,16 @@ export default async function handler(req, res) {
       })
     }
 
+    // --------------------------------
+    // Contract Risks
+    // --------------------------------
+
     if (honeypot)
       addRisk(
         "honeypot",
-        80,
+        90,
         "Honeypot detected",
-        "Token may block selling."
+        "Token may allow buying but block selling."
       )
 
     if (mintable)
@@ -153,7 +141,7 @@ export default async function handler(req, res) {
         "mintable",
         20,
         "Mint function enabled",
-        "Supply can be inflated."
+        "New tokens may be created."
       )
 
     if (blacklist)
@@ -169,15 +157,15 @@ export default async function handler(req, res) {
         "transferPause",
         20,
         "Transfers can be paused",
-        "Trading may be frozen."
+        "Trading could be frozen."
       )
 
     if (proxyContract)
       addRisk(
         "proxyContract",
         10,
-        "Upgradeable proxy",
-        "Logic may change."
+        "Upgradeable contract",
+        "Logic may be changed later."
       )
 
     if (!ownerRenounced)
@@ -185,45 +173,67 @@ export default async function handler(req, res) {
         "ownerActive",
         15,
         "Owner still active",
-        "Developer retains control."
+        "Developer retains contract control."
       )
 
-    // Liquidity risk
+    // --------------------------------
+    // Liquidity Risk
+    // --------------------------------
 
     if (liquidityUSD < 25000)
       addRisk(
         "lowLiquidity",
         30,
         "Low liquidity",
-        "Price manipulation possible."
+        "Price may be manipulated easily."
       )
 
-    // Whale concentration
-
-    if (top10Percent > 60)
+    if (liquidityRatio < 0.01)
       addRisk(
-        "whaleConcentration",
-        40,
-        "Whale concentration",
-        "Top wallets control majority supply."
+        "extremeLiquidityRatio",
+        30,
+        "Extremely low liquidity ratio",
+        "Liquidity compared to market cap is extremely low."
       )
 
-    else if (top10Percent > 40)
+    else if (liquidityRatio < 0.03)
       addRisk(
-        "highWhaleConcentration",
+        "lowLiquidityRatio",
+        15,
+        "Low liquidity ratio",
+        "Liquidity relative to market cap is limited."
+      )
+
+    // --------------------------------
+    // Volume Manipulation
+    // --------------------------------
+
+    if (volumePressure > 10)
+      addRisk(
+        "extremeVolumePressure",
         20,
-        "High whale concentration",
-        "Large holders may control price."
+        "Extreme volume pressure",
+        "Trading volume far exceeds liquidity."
       )
 
-    // Taxes
+    else if (volumePressure > 5)
+      addRisk(
+        "highVolumePressure",
+        10,
+        "High trading pressure",
+        "Speculative trading detected."
+      )
+
+    // --------------------------------
+    // Tax Risk
+    // --------------------------------
 
     if (sellTax > 20)
       addRisk(
         "extremeSellTax",
         40,
         "Extreme sell tax",
-        "Selling heavily penalized."
+        "Selling may incur heavy losses."
       )
 
     else if (sellTax > 10)
@@ -231,15 +241,27 @@ export default async function handler(req, res) {
         "highSellTax",
         20,
         "High sell tax",
-        "Selling expensive."
+        "Selling is expensive."
       )
+
+    if (buyTax > 10)
+      addRisk(
+        "highBuyTax",
+        10,
+        "High buy tax",
+        "Buying incurs additional cost."
+      )
+
+    // --------------------------------
+    // Clamp Score
+    // --------------------------------
 
     if (riskScore > 100)
       riskScore = 100
 
-    // -----------------------------
+    // --------------------------------
     // Risk Level
-    // -----------------------------
+    // --------------------------------
 
     let riskLevel = "Very Safe"
 
@@ -252,9 +274,9 @@ export default async function handler(req, res) {
     else if (riskScore >= 20)
       riskLevel = "Low Risk"
 
-    // -----------------------------
+    // --------------------------------
     // Response
-    // -----------------------------
+    // --------------------------------
 
     return res.status(200).json({
 
@@ -279,14 +301,12 @@ export default async function handler(req, res) {
 
       liquidityUSD,
       marketCap,
+      liquidityRatio,
 
       volume24h,
-      price,
+      volumePressure,
 
-      holderMetrics: {
-        top10Percent,
-        whaleRisk
-      },
+      price,
 
       scanTime: new Date().toISOString()
 
