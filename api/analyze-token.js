@@ -1,8 +1,5 @@
 export default async function handler(req, res) {
 
-  // -----------------------------
-  // CORS
-  // -----------------------------
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
@@ -25,27 +22,39 @@ export default async function handler(req, res) {
 
     const normalizedAddress = address.toLowerCase()
 
+    const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
+
     // -----------------------------
-    // Fetch Data
+    // Fetch APIs
     // -----------------------------
 
-    const [goplusRes, dexRes] = await Promise.all([
+    const [goplusRes, dexRes, holderRes] = await Promise.all([
+
       fetch(
         `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${normalizedAddress}`
       ),
+
       fetch(
         `https://api.dexscreener.com/latest/dex/tokens/${normalizedAddress}`
+      ),
+
+      fetch(
+        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${normalizedAddress}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`
       )
+
     ])
 
     const goplus = await goplusRes.json()
     const dex = await dexRes.json()
+    const holderData = await holderRes.json()
 
     const security = goplus?.result?.[normalizedAddress] || {}
     const pair = dex?.pairs?.[0] || {}
 
+    const holders = holderData?.result || []
+
     // -----------------------------
-    // Token Metadata
+    // Metadata
     // -----------------------------
 
     const tokenName =
@@ -57,43 +66,57 @@ export default async function handler(req, res) {
       pair?.baseToken?.symbol ||
       ""
 
-    // -----------------------------
-    // Market Data
-    // -----------------------------
-
     const liquidityUSD = Number(pair?.liquidity?.usd || 0)
     const marketCap = Number(pair?.fdv || 0)
-
-    const price = Number(pair?.priceUsd || 0)
-    const volume24h = Number(pair?.volume?.h24 || 0)
 
     const buyTax = Number(security.buy_tax || 0)
     const sellTax = Number(security.sell_tax || 0)
 
+    const price = Number(pair?.priceUsd || 0)
+    const volume24h = Number(pair?.volume?.h24 || 0)
+
     // -----------------------------
-    // Security Signals
+    // Security Flags
     // -----------------------------
 
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
     const blacklist = security.is_blacklisted === "1"
-
-    const transferPausable =
-      security.transfer_pausable === "1" ||
-      security.is_pausable === "1"
-
     const proxyContract = security.is_proxy === "1"
 
-    const hiddenOwner = security.hidden_owner === "1"
-
-    const ownerChangeBalance =
-      security.owner_change_balance === "1"
+    const transferPausable =
+      security.transfer_pausable === "1"
 
     const ownerAddress = security.owner_address || ""
 
     const ownerRenounced =
       ownerAddress ===
       "0x0000000000000000000000000000000000000000"
+
+    // -----------------------------
+    // Holder Distribution
+    // -----------------------------
+
+    let top10Percent = 0
+    let whaleRisk = false
+
+    if (holders.length > 0) {
+
+      const totalSupply = holders.reduce(
+        (sum, h) => sum + Number(h.TokenHolderQuantity),
+        0
+      )
+
+      const top10Supply = holders.reduce(
+        (sum, h) => sum + Number(h.TokenHolderQuantity),
+        0
+      )
+
+      top10Percent = (top10Supply / totalSupply) * 100
+
+      if (top10Percent > 60)
+        whaleRisk = true
+    }
 
     // -----------------------------
     // Risk Engine
@@ -117,40 +140,12 @@ export default async function handler(req, res) {
       })
     }
 
-    // -----------------------------
-    // Contract Risk
-    // -----------------------------
-
     if (honeypot)
       addRisk(
         "honeypot",
         80,
         "Honeypot detected",
-        "This token may allow buying but restrict selling."
-      )
-
-    if (hiddenOwner)
-      addRisk(
-        "hiddenOwner",
-        40,
-        "Hidden owner detected",
-        "Developer may retain hidden contract control."
-      )
-
-    if (ownerChangeBalance)
-      addRisk(
-        "ownerChangeBalance",
-        35,
-        "Owner can change balances",
-        "Token balances may be manipulated."
-      )
-
-    if (blacklist)
-      addRisk(
-        "blacklist",
-        30,
-        "Blacklist capability",
-        "Wallets may be blocked from trading."
+        "Token may block selling."
       )
 
     if (mintable)
@@ -158,7 +153,15 @@ export default async function handler(req, res) {
         "mintable",
         20,
         "Mint function enabled",
-        "New tokens can be created by the contract."
+        "Supply can be inflated."
+      )
+
+    if (blacklist)
+      addRisk(
+        "blacklist",
+        30,
+        "Blacklist capability",
+        "Wallets may be blocked."
       )
 
     if (transferPausable)
@@ -166,27 +169,61 @@ export default async function handler(req, res) {
         "transferPause",
         20,
         "Transfers can be paused",
-        "Trading may be frozen by the owner."
+        "Trading may be frozen."
       )
 
     if (proxyContract)
       addRisk(
         "proxyContract",
         10,
-        "Upgradeable proxy contract",
-        "Contract logic may be upgraded."
+        "Upgradeable proxy",
+        "Logic may change."
       )
 
-    // -----------------------------
-    // Tokenomics Risk
-    // -----------------------------
+    if (!ownerRenounced)
+      addRisk(
+        "ownerActive",
+        15,
+        "Owner still active",
+        "Developer retains control."
+      )
+
+    // Liquidity risk
+
+    if (liquidityUSD < 25000)
+      addRisk(
+        "lowLiquidity",
+        30,
+        "Low liquidity",
+        "Price manipulation possible."
+      )
+
+    // Whale concentration
+
+    if (top10Percent > 60)
+      addRisk(
+        "whaleConcentration",
+        40,
+        "Whale concentration",
+        "Top wallets control majority supply."
+      )
+
+    else if (top10Percent > 40)
+      addRisk(
+        "highWhaleConcentration",
+        20,
+        "High whale concentration",
+        "Large holders may control price."
+      )
+
+    // Taxes
 
     if (sellTax > 20)
       addRisk(
         "extremeSellTax",
         40,
         "Extreme sell tax",
-        "Selling the token may incur heavy losses."
+        "Selling heavily penalized."
       )
 
     else if (sellTax > 10)
@@ -194,126 +231,37 @@ export default async function handler(req, res) {
         "highSellTax",
         20,
         "High sell tax",
-        "Selling may be expensive."
+        "Selling expensive."
       )
-
-    if (buyTax > 10)
-      addRisk(
-        "highBuyTax",
-        10,
-        "High buy tax",
-        "Buying the token may incur extra costs."
-      )
-
-    // -----------------------------
-    // Liquidity Risk
-    // -----------------------------
-
-    let liquidityRatio = 0
-
-    if (marketCap > 0)
-      liquidityRatio = liquidityUSD / marketCap
-
-    if (liquidityUSD < 25000)
-      addRisk(
-        "lowLiquidity",
-        30,
-        "Very low liquidity",
-        "Liquidity pool is small and may cause volatility."
-      )
-
-    if (liquidityRatio < 0.01)
-      addRisk(
-        "extremeLiquidityRisk",
-        30,
-        "Extremely low liquidity ratio",
-        "Liquidity relative to market cap is extremely low."
-      )
-
-    else if (liquidityRatio < 0.03)
-      addRisk(
-        "lowLiquidityRatio",
-        15,
-        "Low liquidity ratio",
-        "Liquidity relative to market cap is limited."
-      )
-
-    // -----------------------------
-    // Dangerous Patterns
-    // -----------------------------
-
-    if (mintable && !ownerRenounced)
-      addRisk(
-        "mintRugRisk",
-        25,
-        "Mint rug risk",
-        "Owner can mint unlimited tokens."
-      )
-
-    if (proxyContract && !ownerRenounced)
-      addRisk(
-        "upgradeRisk",
-        20,
-        "Upgradeable ownership risk",
-        "Owner may upgrade contract logic."
-      )
-
-    if (transferPausable && blacklist)
-      addRisk(
-        "tradingRestriction",
-        30,
-        "Trading restriction risk",
-        "Transfers may be frozen or blocked."
-      )
-
-    // -----------------------------
-    // Cap Score
-    // -----------------------------
 
     if (riskScore > 100)
       riskScore = 100
 
     // -----------------------------
-    // Risk Levels
+    // Risk Level
     // -----------------------------
 
     let riskLevel = "Very Safe"
 
     if (riskScore >= 80)
       riskLevel = "Extreme Risk"
-
     else if (riskScore >= 60)
       riskLevel = "High Risk"
-
     else if (riskScore >= 40)
       riskLevel = "Moderate Risk"
-
     else if (riskScore >= 20)
       riskLevel = "Low Risk"
-
-    // -----------------------------
-    // Trade Verdict
-    // -----------------------------
-
-    let tradeSafety = "Safe"
-
-    if (riskScore > 70)
-      tradeSafety = "Unsafe"
-
-    else if (riskScore > 40)
-      tradeSafety = "Caution"
 
     // -----------------------------
     // Response
     // -----------------------------
 
-    const result = {
+    return res.status(200).json({
 
       tokenName,
       tokenSymbol,
       tokenAddress: normalizedAddress,
 
-      tradeSafety,
       riskScore,
       riskLevel,
 
@@ -331,16 +279,18 @@ export default async function handler(req, res) {
 
       liquidityUSD,
       marketCap,
-      liquidityRatio,
 
       volume24h,
       price,
 
+      holderMetrics: {
+        top10Percent,
+        whaleRisk
+      },
+
       scanTime: new Date().toISOString()
 
-    }
-
-    return res.status(200).json(result)
+    })
 
   } catch (error) {
 
