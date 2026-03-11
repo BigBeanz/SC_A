@@ -1,5 +1,8 @@
 export default async function handler(req, res) {
 
+  // -----------------------------
+  // CORS HEADERS
+  // -----------------------------
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
@@ -17,80 +20,83 @@ export default async function handler(req, res) {
     const { address } = req.body
 
     if (!address) {
-      return res.status(400).json({ error: "Missing contract address" })
+      return res.status(400).json({
+        error: "Missing contract address"
+      })
     }
 
-    // -------------------------
-    // Fetch security data
-    // -------------------------
+    // -----------------------------
+    // Fetch GoPlus Security Data
+    // -----------------------------
 
     const goplus = await fetch(
       `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${address}`
     ).then(r => r.json())
 
+    const security = goplus?.result?.[address] || {}
+
+    // -----------------------------
+    // Fetch DexScreener Market Data
+    // -----------------------------
+
     const dex = await fetch(
       `https://api.dexscreener.com/latest/dex/tokens/${address}`
     ).then(r => r.json())
 
-    const security = goplus.result[address] || {}
+    const pair = dex?.pairs?.[0] || null
 
-    const pair = dex.pairs ? dex.pairs[0] : null
-
-    // -------------------------
-    // Extract important signals
-    // -------------------------
+    // -----------------------------
+    // Extract Security Signals
+    // -----------------------------
 
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
     const blacklist = security.is_blacklisted === "1"
-    const ownerRenounced = security.owner_address === "0x0000000000000000000000000000000000000000"
+
+    const ownerRenounced =
+      security.owner_address ===
+      "0x0000000000000000000000000000000000000000"
 
     const buyTax = security.buy_tax || "0"
     const sellTax = security.sell_tax || "0"
 
-    const liquidity = pair?.liquidity?.usd || 0
+    const liquidityUSD = pair?.liquidity?.usd || 0
     const marketCap = pair?.fdv || 0
 
-    // -------------------------
-    // Risk scoring model
-    // -------------------------
+    // -----------------------------
+    // Risk Model
+    // -----------------------------
 
-    let risk = 100
+    let riskScore = 100
 
-    if (honeypot) risk -= 50
-    if (mintable) risk -= 15
-    if (blacklist) risk -= 20
-    if (!ownerRenounced) risk -= 10
-    if (sellTax > 10) risk -= 10
+    if (honeypot) riskScore -= 50
+    if (mintable) riskScore -= 15
+    if (blacklist) riskScore -= 20
+    if (!ownerRenounced) riskScore -= 10
+    if (Number(sellTax) > 10) riskScore -= 10
 
-    if (risk < 0) risk = 0
+    if (riskScore < 0) riskScore = 0
 
-    // -------------------------
-    // Final response
-    // -------------------------
+    // -----------------------------
+    // FINAL FLATTENED RESPONSE
+    // -----------------------------
 
     const result = {
 
       tokenAddress: address,
 
-      riskScore: risk,
+      riskScore,
 
-      security: {
-        honeypot,
-        mintable,
-        blacklist,
-        ownerRenounced
-      },
+      honeypot,
+      mintable,
+      blacklist,
+      ownerRenounced,
 
-      tokenomics: {
-        buyTax,
-        sellTax
-      },
+      buyTax,
+      sellTax,
 
-      market: {
-        liquidityUSD: liquidity,
-        marketCap
-      },
+      liquidityUSD,
+      marketCap,
 
       scanTime: new Date().toISOString()
 
@@ -98,14 +104,13 @@ export default async function handler(req, res) {
 
     res.status(200).json(result)
 
-  } catch (err) {
+  } catch (error) {
 
-    console.error(err)
+    console.error(error)
 
     res.status(500).json({
       error: "Analyzer failed"
     })
 
   }
-
 }
