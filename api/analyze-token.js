@@ -66,6 +66,15 @@ export default async function handler(req, res) {
     const dexName = pair?.dexId || "unknown"
 
     // --------------------------------
+    // New Fields Requested
+    // --------------------------------
+
+    const pairCreatedAt = pair?.pairCreatedAt || null
+    const priceChange24h = pair?.priceChange?.h24 || null
+    const fdv = parseFloat(pair?.fdv || 0)
+    const scanTime = new Date().toISOString()
+
+    // --------------------------------
     // Chain map for APIs
     // --------------------------------
 
@@ -244,6 +253,24 @@ export default async function handler(req, res) {
       : "A"
 
     // --------------------------------
+    // Risk Signals (New)
+    // --------------------------------
+
+    const riskSignals = []
+
+    if (securityData.honeypot) riskSignals.push("honeypot")
+    if (securityData.mintable) riskSignals.push("mintable")
+    if (!securityData.ownerRenounced) riskSignals.push("ownerRenounced")
+    if (securityData.hiddenOwner) riskSignals.push("hiddenOwner")
+    if (securityData.selfDestruct) riskSignals.push("selfDestruct")
+    if (securityData.blacklist) riskSignals.push("blacklist")
+    if (securityData.transferPausable) riskSignals.push("transferPausable")
+    if (securityData.proxyContract) riskSignals.push("proxyContract")
+    if (securityData.canTakeBackOwnership) riskSignals.push("canTakeBackOwnership")
+    if (securityData.sellTax > 10) riskSignals.push("highSellTax")
+    if (liquidityUSD < 10000) riskSignals.push("lowLiquidity")
+
+    // --------------------------------
     // Response
     // --------------------------------
 
@@ -263,9 +290,15 @@ export default async function handler(req, res) {
       sells24h,
       dexName,
 
+      pairCreatedAt,
+      priceChange24h,
+      fdv,
+      scanTime,
+
       riskScore,
       riskLevel,
       securityGrade,
+      riskSignals,
 
       ...securityData,
       ...holderData
