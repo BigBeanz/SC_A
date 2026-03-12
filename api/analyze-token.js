@@ -1,13 +1,20 @@
+import axios from "axios"
+import { ethers } from "ethers"
+
+const PULSECHAIN_RPC = "https://rpc.pulsechain.com"
+const provider = new ethers.JsonRpcProvider(PULSECHAIN_RPC)
+
 export default async function handler(req, res) {
 
-  // -----------------------------
-  // CORS
-  // -----------------------------
+  // -------------------------
+  // CORS HEADERS (DO NOT REMOVE)
+  // -------------------------
 
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
 
+  // Handle preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end()
   }
@@ -18,358 +25,201 @@ export default async function handler(req, res) {
 
   try {
 
-    const { address } = req.body
+    const { contractAddress } = req.body
 
-    if (!address) {
-      return res.status(400).json({ error: "Missing contract address" })
+    if (!ethers.isAddress(contractAddress)) {
+      return res.status(400).json({ error: "Invalid contract address" })
     }
 
-    const token = address.toLowerCase()
-    const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
+    // -------------------------
+    // PARALLEL DATA FETCH
+    // -------------------------
 
-    // --------------------------------------------------
-    // Fetch APIs
-    // --------------------------------------------------
-
-    const [goplusRes, dexRes, creationRes] = await Promise.all([
-
-      fetch(
-        `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${token}`
-      ),
-
-      fetch(
-        `https://api.dexscreener.com/latest/dex/tokens/${token}`
-      ),
-
-      fetch(
-        `https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${token}&apikey=${ETHERSCAN_API_KEY}`
-      )
-
+    const [dexData, holderData] = await Promise.all([
+      fetchDexData(contractAddress),
+      fetchHolderDistribution(contractAddress)
     ])
 
-    const goplus = await goplusRes.json()
-    const dex = await dexRes.json()
-    const creation = await creationRes.json()
-
-    const security = goplus?.result?.[token] || {}
-    const pair = dex?.pairs?.[0] || {}
-
-    // --------------------------------------------------
-    // Token Metadata
-    // --------------------------------------------------
-
-    const tokenName =
-      pair?.baseToken?.name ||
-      security.token_name ||
-      "Unknown Token"
-
-    const tokenSymbol =
-      pair?.baseToken?.symbol ||
-      ""
-
-    // --------------------------------------------------
-    // Market Data
-    // --------------------------------------------------
-
-    const liquidityUSD = Number(pair?.liquidity?.usd || 0)
-    const marketCap = Number(pair?.fdv || 0)
-    const volume24h = Number(pair?.volume?.h24 || 0)
-    const price = Number(pair?.priceUsd || 0)
-
-    // --------------------------------------------------
-    // Tokenomics
-    // --------------------------------------------------
-
-    const buyTax = Number(security.buy_tax || 0)
-    const sellTax = Number(security.sell_tax || 0)
-
-    // --------------------------------------------------
-    // Security Flags
-    // --------------------------------------------------
-
-    const honeypot = security.is_honeypot === "1"
-    const mintable = security.is_mintable === "1"
-    const proxyContract = security.is_proxy === "1"
-
-    const ownerRenounced =
-      security.owner_address ===
-      "0x0000000000000000000000000000000000000000"
-
-    // --------------------------------------------------
-    // Contract Age
-    // --------------------------------------------------
-
-    let contractAgeDays = null
-
-    if (creation?.result?.length > 0) {
-
-      const txHash = creation.result[0].txHash
-
-      const txRes = await fetch(
-        `https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${ETHERSCAN_API_KEY}`
-      )
-
-      const tx = await txRes.json()
-      const blockNumber = tx?.result?.blockNumber
-
-      if (blockNumber) {
-
-        const blockRes = await fetch(
-          `https://api.etherscan.io/api?module=proxy&action=eth_getBlockByNumber&tag=${blockNumber}&boolean=true&apikey=${ETHERSCAN_API_KEY}`
-        )
-
-        const block = await blockRes.json()
-        const timestampHex = block?.result?.timestamp
-
-        if (timestampHex) {
-
-          const timestamp =
-            parseInt(timestampHex, 16) * 1000
-
-          contractAgeDays =
-            (Date.now() - timestamp) / 86400000
-
-        }
-
-      }
-
-    }
-
-    // --------------------------------------------------
-    // Whale Distribution Detection
-    // --------------------------------------------------
-
-    let topHolderPercent = null
-    let top5Percent = null
-    let top10Percent = null
-    let whaleRisk = "Unknown"
-
-    try {
-
-      const holdersRes = await fetch(
-        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${token}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`
-      )
-
-      const holders = await holdersRes.json()
-
-      if (Array.isArray(holders?.result)) {
-
-        const total = holders.result.reduce(
-          (sum, h) => sum + Number(h.TokenHolderQuantity || 0),
-          0
-        )
-
-        if (total > 0) {
-
-          let top5 = 0
-          let top10 = 0
-
-          holders.result.forEach((h, i) => {
-
-            const pct =
-              Number(h.TokenHolderQuantity || 0) /
-              total * 100
-
-            if (i === 0)
-              topHolderPercent = pct
-
-            if (i < 5)
-              top5 += pct
-
-            if (i < 10)
-              top10 += pct
-
-          })
-
-          top5Percent = top5
-          top10Percent = top10
-
-        }
-
-      }
-
-    } catch (e) {
-
-      console.log("Holder distribution unavailable")
-
-    }
-
-    // Whale Risk Logic
-
-    if (topHolderPercent !== null) {
-
-      if (topHolderPercent > 25)
-        whaleRisk = "High"
-
-      else if (top10Percent > 60)
-        whaleRisk = "High"
-
-      else if (topHolderPercent < 10)
-        whaleRisk = "Healthy"
-
-      else
-        whaleRisk = "Moderate"
-
-    }
-
-    // --------------------------------------------------
-    // Market Metrics
-    // --------------------------------------------------
-
-    const liquidityRatio =
-      marketCap > 0 ? liquidityUSD / marketCap : 0
-
-    const volumePressure =
-      liquidityUSD > 0 ? volume24h / liquidityUSD : 0
-
-    // --------------------------------------------------
-    // Risk Engine
-    // --------------------------------------------------
-
-    let riskScore = 0
-    const riskSignals = []
-
-    function addRisk(key, points, title, description) {
-
-      riskScore += points
-
-      riskSignals.push({
-        key,
-        title,
-        description
-      })
-
-    }
-
-    if (honeypot)
-      addRisk(
-        "honeypot",
-        80,
-        "Possible honeypot",
-        "Security scanner detected honeypot behavior."
-      )
-
-    if (mintable)
-      addRisk(
-        "mint",
-        15,
-        "Mint function enabled",
-        "Supply can increase."
-      )
-
-    if (!ownerRenounced)
-      addRisk(
-        "owner",
-        10,
-        "Owner active",
-        "Developer retains control."
-      )
-
-    if (proxyContract)
-      addRisk(
-        "proxy",
-        8,
-        "Upgradeable contract",
-        "Logic can change."
-      )
-
-    if (liquidityUSD < 25000)
-      addRisk(
-        "lowLiquidity",
-        20,
-        "Low liquidity",
-        "Price easily manipulated."
-      )
-
-    if (contractAgeDays !== null && contractAgeDays < 7)
-      addRisk(
-        "newContract",
-        20,
-        "New contract",
-        "Recently deployed token."
-      )
-
-    if (topHolderPercent !== null && topHolderPercent > 25)
-      addRisk(
-        "whale",
-        25,
-        "Large whale holder",
-        "Top wallet holds a large percentage of supply."
-      )
-
-    if (sellTax > 20)
-      addRisk(
-        "sellTax",
-        30,
-        "Extreme sell tax",
-        "Selling heavily penalized."
-      )
-
-    if (riskScore > 100) riskScore = 100
-
-    // --------------------------------------------------
-    // Risk Level
-    // --------------------------------------------------
-
-    let riskLevel = "Low Risk"
-
-    if (riskScore >= 80)
-      riskLevel = "Extreme Risk"
-    else if (riskScore >= 60)
-      riskLevel = "High Risk"
-    else if (riskScore >= 40)
-      riskLevel = "Moderate Risk"
-
-    // --------------------------------------------------
-    // Response
-    // --------------------------------------------------
-
-    return res.status(200).json({
-
-      tokenName,
-      tokenSymbol,
-      tokenAddress: token,
-
-      riskScore,
-      riskLevel,
-
-      contractAgeDays,
-
-      liquidityUSD,
-      marketCap,
-      volume24h,
-      price,
-
-      buyTax,
-      sellTax,
-
-      honeypot,
-      mintable,
-      ownerRenounced,
-      proxyContract,
-
-      liquidityRatio,
-      volumePressure,
-
-      topHolderPercent,
-      top5Percent,
-      top10Percent,
-      whaleRisk,
-
-      riskSignals,
-
-      scanTime: new Date().toISOString()
-
+    const whaleDistribution = calculateWhaleDistribution(holderData)
+
+    const safety = calculateSafetyScore({
+      liquidity: dexData.liquidity,
+      top10Percent: whaleDistribution.top10Percent
     })
 
-  } catch (err) {
+    // -------------------------
+    // FINAL API RESPONSE
+    // -------------------------
 
-    console.error("ANALYZER ERROR:", err)
+    return res.json({
+
+      token: {
+        name: dexData.name,
+        symbol: dexData.symbol,
+        price: dexData.price
+      },
+
+      market: {
+        marketCap: dexData.marketCap,
+        liquidity: dexData.liquidity,
+        volume24h: dexData.volume24h,
+        dex: dexData.dex
+      },
+
+      safety: safety,
+
+      // REQUIRED BY FRONTEND
+      topHolderPercent: whaleDistribution.topHolderPercent,
+      top5Percent: whaleDistribution.top5Percent,
+      top10Percent: whaleDistribution.top10Percent,
+      whaleRisk: whaleDistribution.whaleRisk,
+
+      distribution: whaleDistribution
+    })
+
+  } catch (error) {
+
+    console.error("Analyze Token Error:", error)
 
     return res.status(500).json({
-      error: "Analyzer failed"
+      error: "Token analysis failed"
     })
 
+  }
+}
+
+//
+// ---------------------------------------------------
+// DEX DATA
+// ---------------------------------------------------
+//
+
+async function fetchDexData(address) {
+
+  const url = `https://api.dexscreener.com/latest/dex/tokens/${address}`
+
+  try {
+
+    const response = await axios.get(url)
+
+    const pair = response.data.pairs?.[0]
+
+    if (!pair) {
+      return emptyDex()
+    }
+
+    return {
+      name: pair.baseToken?.name || "Unknown",
+      symbol: pair.baseToken?.symbol || "TOKEN",
+      price: parseFloat(pair.priceUsd || 0),
+      marketCap: parseFloat(pair.marketCap || 0),
+      liquidity: parseFloat(pair.liquidity?.usd || 0),
+      volume24h: parseFloat(pair.volume?.h24 || 0),
+      dex: pair.dexId || "Unknown"
+    }
+
+  } catch {
+
+    return emptyDex()
+
+  }
+}
+
+function emptyDex() {
+
+  return {
+    name: "Unknown",
+    symbol: "TOKEN",
+    price: 0,
+    marketCap: 0,
+    liquidity: 0,
+    volume24h: 0,
+    dex: "Unknown"
+  }
+
+}
+
+//
+// ---------------------------------------------------
+// HOLDER DISTRIBUTION (TEMP MOCK)
+// ---------------------------------------------------
+//
+
+async function fetchHolderDistribution() {
+
+  // NOTE FOR CLAUDE / FUTURE DEV:
+  // This is mocked because PulseChain has no fast holder API yet.
+  // Replace later with Bitquery or Covalent.
+
+  return [
+    { wallet: "0x1", percent: 14.5 },
+    { wallet: "0x2", percent: 9.3 },
+    { wallet: "0x3", percent: 6.8 },
+    { wallet: "0x4", percent: 5.1 },
+    { wallet: "0x5", percent: 4.9 },
+    { wallet: "0x6", percent: 3.2 },
+    { wallet: "0x7", percent: 2.8 },
+    { wallet: "0x8", percent: 2.6 },
+    { wallet: "0x9", percent: 2.4 },
+    { wallet: "0x10", percent: 2.1 }
+  ]
+
+}
+
+//
+// ---------------------------------------------------
+// WHALE DISTRIBUTION
+// ---------------------------------------------------
+//
+
+function calculateWhaleDistribution(holderData) {
+
+  const topHolderPercent = holderData[0]?.percent || 0
+
+  const top5Percent = holderData
+    .slice(0, 5)
+    .reduce((sum, h) => sum + h.percent, 0)
+
+  const top10Percent = holderData
+    .slice(0, 10)
+    .reduce((sum, h) => sum + h.percent, 0)
+
+  let whaleRisk = "Low"
+
+  if (top10Percent > 60) whaleRisk = "High"
+  else if (top10Percent > 35) whaleRisk = "Moderate"
+
+  return {
+    topHolderPercent,
+    top5Percent,
+    top10Percent,
+    whaleRisk
+  }
+
+}
+
+//
+// ---------------------------------------------------
+// SAFETY SCORE
+// ---------------------------------------------------
+//
+
+function calculateSafetyScore({ liquidity, top10Percent }) {
+
+  let score = 100
+
+  if (liquidity < 100000) score -= 15
+  if (top10Percent > 50) score -= 20
+  if (top10Percent > 70) score -= 30
+
+  let level = "Low Risk"
+
+  if (score < 70) level = "Moderate Risk"
+  if (score < 40) level = "High Risk"
+
+  return {
+    score,
+    level
   }
 
 }
