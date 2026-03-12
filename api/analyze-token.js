@@ -79,23 +79,18 @@ export default async function handler(req, res) {
     const moralisChain = chainMap[chain]?.moralis || null
     const goplusChain = chainMap[chain]?.goplus || null
 
-    const [
-      dexResult,
-      goplusResult,
-      moralisResult,
-      pulseMetaResult,
-      pulseHolderResult
-    ] = await Promise.all([
-      fetchDexScreener(contractAddress, chain),
-      fetchGoPlus(contractAddress, goplusChain),
-      fetchMoralisHolders(contractAddress, moralisChain),
-      chain === "pulsechain"
-        ? fetchPulsechainTokenMetadata(contractAddress)
-        : Promise.resolve(null),
-      chain === "pulsechain"
-        ? fetchPulsechainHolderDistribution(contractAddress)
-        : Promise.resolve(null),
-    ])
+    const [dexResult, goplusResult, moralisResult, pulseMetaResult, pulseHolderResult] =
+      await Promise.all([
+        fetchDexScreener(contractAddress, chain),
+        fetchGoPlus(contractAddress, goplusChain),
+        fetchMoralisHolders(contractAddress, moralisChain),
+        chain === "pulsechain"
+          ? fetchPulsechainTokenMetadata(contractAddress)
+          : Promise.resolve(null),
+        chain === "pulsechain"
+          ? fetchPulsechainHolderDistribution(contractAddress)
+          : Promise.resolve(null),
+      ])
 
     const pair = dexResult?.pair || null
 
@@ -163,10 +158,6 @@ export default async function handler(req, res) {
     let score = 0
     const riskSignalSet = new Set()
 
-    // --------------------------------
-    // CONTRACT RISKS
-    // --------------------------------
-
     if (securityData.honeypot === true) {
       score += 40
       riskSignalSet.add("honeypot")
@@ -192,34 +183,20 @@ export default async function handler(req, res) {
       riskSignalSet.add("highSellTax")
     }
 
-    // --------------------------------
-    // LIQUIDITY RISKS
-    // --------------------------------
-
     if (liquidityUSD < 10000) {
       score += 20
       riskSignalSet.add("lowLiquidity")
     }
 
-    if (liqRatio !== null) {
-      if (liqRatio < 0.02) {
-        score += 25
-        riskSignalSet.add("extremeLiquidityRisk")
-      }
-      else if (liqRatio < 0.05) {
-        score += 15
-        riskSignalSet.add("lowLiquiditySupport")
-      }
+    if (liqRatio !== null && liqRatio < 0.02) {
+      score += 25
+      riskSignalSet.add("extremeLiquidityRisk")
     }
 
     if (volRatio !== null && volRatio > 8) {
       score += 15
       riskSignalSet.add("washTradingSuspected")
     }
-
-    // --------------------------------
-    // WHALE RISKS
-    // --------------------------------
 
     if ((holderData.topHolderPercent ?? 0) > 20) {
       score += 10
@@ -230,10 +207,6 @@ export default async function handler(req, res) {
       score += 30
       riskSignalSet.add("extremeWhaleControl")
     }
-
-    // --------------------------------
-    // MARKET HEALTH SCORING
-    // --------------------------------
 
     if (priceChange24h !== null) {
 
@@ -276,10 +249,8 @@ export default async function handler(req, res) {
     }
 
     if (contractAgeDays !== null && contractAgeDays < 7 && liquidityUSD < 50000) {
-
       score += 20
       riskSignalSet.add("newTokenLowLiquidity")
-
     }
 
     if (sellPressure !== null) {
@@ -299,17 +270,13 @@ export default async function handler(req, res) {
       marketCap > 0 ? volume24h / marketCap : null
 
     if (marketActivityRatio !== null && marketActivityRatio < 0.001 && marketCap > 10000) {
-
       score += 12
       riskSignalSet.add("lowMarketActivity")
-
     }
 
     if (volume24h < 500 && marketCap > 5000) {
-
       score += 15
       riskSignalSet.add("inactiveToken")
-
     }
 
     const riskScore = clamp(Math.round(score), 0, 100)
@@ -359,7 +326,6 @@ export default async function handler(req, res) {
 
       ...securityData,
       ...holderData,
-
     }
 
     setCache(cacheKey, responsePayload)
@@ -374,4 +340,50 @@ export default async function handler(req, res) {
       error: "Analyzer failed",
     })
   }
+}
+
+// --------------------------------
+// CACHE HELPERS
+// --------------------------------
+
+function getCache(key) {
+
+  const entry = RESPONSE_CACHE.get(key)
+
+  if (!entry) return null
+
+  if (Date.now() > entry.expiresAt) {
+    RESPONSE_CACHE.delete(key)
+    return null
+  }
+
+  return entry.data
+}
+
+function setCache(key, data) {
+
+  RESPONSE_CACHE.set(key, {
+    data,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  })
+}
+
+// --------------------------------
+// UTILITY HELPERS
+// --------------------------------
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function safeNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function safeInt(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback
+  const n = parseInt(value, 10)
+  return Number.isFinite(n) ? n : fallback
 }
