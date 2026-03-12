@@ -1,265 +1,187 @@
 export default async function handler(req, res) {
 
-  res.setHeader("Access-Control-Allow-Origin", "*")
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
+res.setHeader("Access-Control-Allow-Origin","*")
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end()
-  }
+if(req.method!=="POST")
+return res.status(405).json({error:"Method not allowed"})
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" })
-  }
+try{
 
-  try {
+const {address}=req.body
+const token=address.toLowerCase()
 
-    const { address } = req.body
+const ETHERSCAN_API_KEY=process.env.ETHERSCAN_API_KEY
 
-    if (!address)
-      return res.status(400).json({ error: "Missing contract address" })
+const [goplusRes,dexRes,holdersRes,creationRes]=await Promise.all([
 
-    const normalizedAddress = address.toLowerCase()
+fetch(`https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${token}`),
 
-    const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
+fetch(`https://api.dexscreener.com/latest/dex/tokens/${token}`),
 
-    const [goplusRes, dexRes, creationRes] = await Promise.all([
+fetch(`https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${token}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`),
 
-      fetch(
-        `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${normalizedAddress}`
-      ),
+fetch(`https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${token}&apikey=${ETHERSCAN_API_KEY}`)
 
-      fetch(
-        `https://api.dexscreener.com/latest/dex/tokens/${normalizedAddress}`
-      ),
+])
 
-      fetch(
-        `https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${normalizedAddress}&apikey=${ETHERSCAN_API_KEY}`
-      )
+const goplus=await goplusRes.json()
+const dex=await dexRes.json()
+const holders=await holdersRes.json()
+const creation=await creationRes.json()
 
-    ])
+const security=goplus?.result?.[token]||{}
+const pair=dex?.pairs?.[0]||{}
 
-    const goplus = await goplusRes.json()
-    const dex = await dexRes.json()
-    const creation = await creationRes.json()
+const liquidityUSD=Number(pair?.liquidity?.usd||0)
+const marketCap=Number(pair?.fdv||0)
+const volume24h=Number(pair?.volume?.h24||0)
+const price=Number(pair?.priceUsd||0)
 
-    const security = goplus?.result?.[normalizedAddress] || {}
-    const pair = dex?.pairs?.[0] || {}
+const buyTax=Number(security.buy_tax||0)
+const sellTax=Number(security.sell_tax||0)
 
-    const tokenName =
-      pair?.baseToken?.name ||
-      security.token_name ||
-      "Unknown Token"
+const honeypot=security.is_honeypot==="1"
+const mintable=security.is_mintable==="1"
+const proxyContract=security.is_proxy==="1"
 
-    const tokenSymbol =
-      pair?.baseToken?.symbol ||
-      ""
+const ownerRenounced=
+security.owner_address==="0x0000000000000000000000000000000000000000"
 
-    const liquidityUSD = Number(pair?.liquidity?.usd || 0)
-    const marketCap = Number(pair?.fdv || 0)
-    const price = Number(pair?.priceUsd || 0)
-    const volume24h = Number(pair?.volume?.h24 || 0)
+let contractAgeDays=null
 
-    const pairCreatedAt =
-      pair?.pairCreatedAt
-        ? new Date(pair.pairCreatedAt).toISOString()
-        : null
+if(creation?.result?.length){
 
-    let contractAgeDays = null
+const txHash=creation.result[0].txHash
 
-    if (creation?.result?.length > 0) {
+const txRes=await fetch(
+`https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${ETHERSCAN_API_KEY}`
+)
 
-      const txHash = creation.result[0].txHash
+const tx=await txRes.json()
+const block=tx?.result?.blockNumber
 
-      const txRes = await fetch(
-        `https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${ETHERSCAN_API_KEY}`
-      )
+if(block){
 
-      const tx = await txRes.json()
-      const blockNumber = tx?.result?.blockNumber
+const blockRes=await fetch(
+`https://api.etherscan.io/api?module=proxy&action=eth_getBlockByNumber&tag=${block}&boolean=true&apikey=${ETHERSCAN_API_KEY}`
+)
 
-      if (blockNumber) {
+const blockData=await blockRes.json()
+const timestamp=parseInt(blockData?.result?.timestamp,16)*1000
 
-        const blockRes = await fetch(
-          `https://api.etherscan.io/api?module=proxy&action=eth_getBlockByNumber&tag=${blockNumber}&boolean=true&apikey=${ETHERSCAN_API_KEY}`
-        )
+contractAgeDays=(Date.now()-timestamp)/86400000
 
-        const block = await blockRes.json()
-        const timestampHex = block?.result?.timestamp
+}
 
-        if (timestampHex) {
+}
 
-          const timestamp = parseInt(timestampHex, 16) * 1000
-          contractAgeDays = (Date.now() - timestamp) / 86400000
+let topHolderPercent=0
+let top10Percent=0
 
-        }
+if(holders?.result){
 
-      }
+const total=holders.result.reduce(
+(a,h)=>a+Number(h.TokenHolderQuantity),0)
 
-    }
+holders.result.forEach((h,i)=>{
 
-    const buyTax = Number(security.buy_tax || 0)
-    const sellTax = Number(security.sell_tax || 0)
+const pct=Number(h.TokenHolderQuantity)/total*100
 
-    const honeypot = security.is_honeypot === "1"
-    const mintable = security.is_mintable === "1"
-    const proxyContract = security.is_proxy === "1"
-    const transferPausable = security.transfer_pausable === "1"
+if(i===0)topHolderPercent=pct
 
-    const ownerAddress = security.owner_address || ""
+if(i<10)top10Percent+=pct
 
-    const ownerRenounced =
-      ownerAddress ===
-      "0x0000000000000000000000000000000000000000"
+})
 
-    // --------------------------------------------------
-    // Liquidity Lock Detection
-    // --------------------------------------------------
+}
 
-    let liquidityLocked = false
-    let liquidityLockType = "unknown"
-    let lpHolder = null
+let liquidityRatio=marketCap>0?liquidityUSD/marketCap:0
+let volumePressure=liquidityUSD>0?volume24h/liquidityUSD:0
 
-    const burnAddress = "0x000000000000000000000000000000000000dead"
+let riskScore=0
+const riskSignals=[]
 
-    if (pair?.pairAddress) {
+function addRisk(key,points,title,desc){
 
-      const lpToken = pair.pairAddress
+riskScore+=points
 
-      const holderRes = await fetch(
-        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${lpToken}&page=1&offset=5&apikey=${ETHERSCAN_API_KEY}`
-      )
+riskSignals.push({key,title,desc})
 
-      const holders = await holderRes.json()
+}
 
-      const topHolder = holders?.result?.[0]?.TokenHolderAddress
+if(honeypot)addRisk("honeypot",80,"Honeypot detected","Token may block selling.")
 
-      lpHolder = topHolder
+if(mintable)addRisk("mint",15,"Mint function enabled","Supply can increase.")
 
-      if (topHolder?.toLowerCase() === burnAddress) {
+if(!ownerRenounced)addRisk("owner",10,"Owner active","Developer retains control.")
 
-        liquidityLocked = true
-        liquidityLockType = "burned"
+if(proxyContract)addRisk("proxy",8,"Upgradeable contract","Contract logic can change.")
 
-      }
+if(liquidityUSD<25000)addRisk("lowLiquidity",20,"Low liquidity","Price easily manipulated.")
 
-    }
+if(liquidityRatio<0.01)addRisk("liqRatio",20,"Liquidity ratio low","Liquidity small vs market cap.")
 
-    // --------------------------------------------------
-    // Risk Engine
-    // --------------------------------------------------
+if(volumePressure>10)addRisk("volume",15,"Extreme trading pressure","Pump/dump risk.")
 
-    let riskScore = 0
-    const riskSignals = []
+if(contractAgeDays!==null&&contractAgeDays<7)
+addRisk("newContract",20,"New contract","Recently deployed.")
 
-    const addRisk = (key, points, title, description) => {
+if(topHolderPercent>25)
+addRisk("whale",25,"Large whale holder","Top wallet holds large supply.")
 
-      riskScore += points
+if(top10Percent>60)
+addRisk("whales",20,"High concentration","Top 10 wallets control supply.")
 
-      riskSignals.push({
-        key,
-        title,
-        description
-      })
+if(sellTax>20)
+addRisk("sellTax",30,"Extreme sell tax","Selling heavily penalized.")
 
-    }
+if(riskScore>100)riskScore=100
 
-    if (honeypot && sellTax > 20)
-      addRisk(
-        "honeypot",
-        80,
-        "Possible honeypot",
-        "Security scanner detected honeypot behavior."
-      )
+let riskLevel="Low Risk"
 
-    else if (honeypot)
-      addRisk(
-        "honeypotWarning",
-        25,
-        "Honeypot warning",
-        "Security API flagged possible honeypot behavior."
-      )
+if(riskScore>=80)riskLevel="Extreme Risk"
+else if(riskScore>=60)riskLevel="High Risk"
+else if(riskScore>=40)riskLevel="Moderate Risk"
 
-    if (mintable)
-      addRisk(
-        "mintable",
-        15,
-        "Mint function enabled",
-        "New tokens can be created."
-      )
+return res.status(200).json({
 
-    if (!ownerRenounced)
-      addRisk(
-        "ownerActive",
-        10,
-        "Owner still active",
-        "Developer retains control."
-      )
+tokenName:pair?.baseToken?.name||"Unknown Token",
+tokenSymbol:pair?.baseToken?.symbol||"",
+tokenAddress:token,
 
-    if (!liquidityLocked)
-      addRisk(
-        "liquidityUnlocked",
-        25,
-        "Liquidity not locked",
-        "Developer may be able to remove liquidity."
-      )
+riskScore,
+riskLevel,
 
-    if (riskScore > 100)
-      riskScore = 100
+contractAgeDays,
 
-    let riskLevel = "Low Risk"
+topHolderPercent,
+top10Percent,
 
-    if (riskScore >= 80)
-      riskLevel = "Extreme Risk"
-    else if (riskScore >= 60)
-      riskLevel = "High Risk"
-    else if (riskScore >= 40)
-      riskLevel = "Moderate Risk"
+liquidityUSD,
+marketCap,
+volume24h,
+price,
 
-    return res.status(200).json({
+buyTax,
+sellTax,
 
-      tokenName,
-      tokenSymbol,
-      tokenAddress: normalizedAddress,
+honeypot,
+mintable,
+ownerRenounced,
+proxyContract,
 
-      riskScore,
-      riskLevel,
+riskSignals,
 
-      contractAgeDays,
-      pairCreatedAt,
+scanTime:new Date().toISOString()
 
-      liquidityLocked,
-      liquidityLockType,
-      lpHolder,
+})
 
-      honeypot,
-      mintable,
-      ownerRenounced,
-      proxyContract,
-      transferPausable,
+}catch(err){
 
-      buyTax,
-      sellTax,
+console.error(err)
 
-      liquidityUSD,
-      marketCap,
-      volume24h,
-      price,
+return res.status(500).json({error:"Analyzer failed"})
 
-      riskSignals,
-
-      scanTime: new Date().toISOString()
-
-    })
-
-  } catch (error) {
-
-    console.error("Analyzer error:", error)
-
-    return res.status(500).json({
-      error: "Analyzer failed"
-    })
-
-  }
+}
 
 }
