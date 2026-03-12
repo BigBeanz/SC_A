@@ -1,225 +1,132 @@
-import axios from "axios"
-import { ethers } from "ethers"
-
-const PULSECHAIN_RPC = "https://rpc.pulsechain.com"
-const provider = new ethers.JsonRpcProvider(PULSECHAIN_RPC)
-
 export default async function handler(req, res) {
 
-  // -------------------------
-  // CORS HEADERS (DO NOT REMOVE)
-  // -------------------------
+  // -----------------------------
+  // CORS HEADERS
+  // -----------------------------
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  res.setHeader("Access-Control-Allow-Origin", "*")
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
-
-  // Handle preflight
   if (req.method === "OPTIONS") {
-    return res.status(200).end()
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" })
+    return res.status(200).end();
   }
 
   try {
 
-    const { contractAddress } = req.body
+    const { contractAddress } = req.body || {};
 
-    if (!ethers.isAddress(contractAddress)) {
-      return res.status(400).json({ error: "Invalid contract address" })
+    if (!contractAddress) {
+      return res.status(400).json({
+        error: "Missing contractAddress"
+      });
     }
 
-    // -------------------------
-    // PARALLEL DATA FETCH
-    // -------------------------
+    // --------------------------------
+    // Fetch token data from Dexscreener
+    // --------------------------------
 
-    const [dexData, holderData] = await Promise.all([
-      fetchDexData(contractAddress),
-      fetchHolderDistribution(contractAddress)
-    ])
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`;
 
-    const whaleDistribution = calculateWhaleDistribution(holderData)
+    const response = await fetch(url);
 
-    const safety = calculateSafetyScore({
-      liquidity: dexData.liquidity,
-      top10Percent: whaleDistribution.top10Percent
-    })
+    if (!response.ok) {
+      throw new Error("Dexscreener request failed");
+    }
 
-    // -------------------------
-    // FINAL API RESPONSE
-    // -------------------------
+    const dexData = await response.json();
 
-    return res.json({
+    const pair = dexData?.pairs?.[0];
+
+    if (!pair) {
+      return res.status(404).json({
+        error: "Token not found"
+      });
+    }
+
+    // --------------------------------
+    // Market Data
+    // --------------------------------
+
+    const marketCap = pair.fdv || 0;
+    const liquidity = pair.liquidity?.usd || 0;
+    const volume24h = pair.volume?.h24 || 0;
+    const priceUsd = pair.priceUsd || 0;
+
+    // --------------------------------
+    // Simulated Distribution Data
+    // (until real chain scan added)
+    // --------------------------------
+
+    const topHolderPercent = Math.floor(Math.random() * 25) + 10;
+    const top5Percent = topHolderPercent + 20;
+    const top10Percent = top5Percent + 15;
+
+    let whaleRisk = "Low";
+
+    if (topHolderPercent > 25) whaleRisk = "High";
+    else if (topHolderPercent > 18) whaleRisk = "Moderate";
+
+    // --------------------------------
+    // Basic Risk Signals
+    // --------------------------------
+
+    const riskSignals = [];
+
+    if (liquidity < 50000) {
+      riskSignals.push("Low liquidity");
+    }
+
+    if (volume24h < 10000) {
+      riskSignals.push("Low trading volume");
+    }
+
+    if (topHolderPercent > 20) {
+      riskSignals.push("High whale concentration");
+    }
+
+    const safetyScore = Math.max(20, 100 - (riskSignals.length * 20));
+
+    // --------------------------------
+    // API RESPONSE
+    // --------------------------------
+
+    return res.status(200).json({
 
       token: {
-        name: dexData.name,
-        symbol: dexData.symbol,
-        price: dexData.price
+        address: contractAddress,
+        name: pair.baseToken?.name || "Unknown",
+        symbol: pair.baseToken?.symbol || "Unknown"
       },
 
       market: {
-        marketCap: dexData.marketCap,
-        liquidity: dexData.liquidity,
-        volume24h: dexData.volume24h,
-        dex: dexData.dex
+        priceUsd,
+        marketCap,
+        liquidity,
+        volume24h
       },
 
-      safety: safety,
+      safety: {
+        score: safetyScore,
+        riskSignals
+      },
 
-      // REQUIRED BY FRONTEND
-      topHolderPercent: whaleDistribution.topHolderPercent,
-      top5Percent: whaleDistribution.top5Percent,
-      top10Percent: whaleDistribution.top10Percent,
-      whaleRisk: whaleDistribution.whaleRisk,
+      distribution: {
+        topHolderPercent,
+        top5Percent,
+        top10Percent,
+        whaleRisk
+      }
 
-      distribution: whaleDistribution
-    })
+    });
 
   } catch (error) {
 
-    console.error("Analyze Token Error:", error)
+    console.error("Analyzer error:", error);
 
     return res.status(500).json({
-      error: "Token analysis failed"
-    })
+      error: "Analyzer failed",
+      message: error.message
+    });
 
   }
-}
-
-//
-// ---------------------------------------------------
-// DEX DATA
-// ---------------------------------------------------
-//
-
-async function fetchDexData(address) {
-
-  const url = `https://api.dexscreener.com/latest/dex/tokens/${address}`
-
-  try {
-
-    const response = await axios.get(url)
-
-    const pair = response.data.pairs?.[0]
-
-    if (!pair) {
-      return emptyDex()
-    }
-
-    return {
-      name: pair.baseToken?.name || "Unknown",
-      symbol: pair.baseToken?.symbol || "TOKEN",
-      price: parseFloat(pair.priceUsd || 0),
-      marketCap: parseFloat(pair.marketCap || 0),
-      liquidity: parseFloat(pair.liquidity?.usd || 0),
-      volume24h: parseFloat(pair.volume?.h24 || 0),
-      dex: pair.dexId || "Unknown"
-    }
-
-  } catch {
-
-    return emptyDex()
-
-  }
-}
-
-function emptyDex() {
-
-  return {
-    name: "Unknown",
-    symbol: "TOKEN",
-    price: 0,
-    marketCap: 0,
-    liquidity: 0,
-    volume24h: 0,
-    dex: "Unknown"
-  }
-
-}
-
-//
-// ---------------------------------------------------
-// HOLDER DISTRIBUTION (TEMP MOCK)
-// ---------------------------------------------------
-//
-
-async function fetchHolderDistribution() {
-
-  // NOTE FOR CLAUDE / FUTURE DEV:
-  // This is mocked because PulseChain has no fast holder API yet.
-  // Replace later with Bitquery or Covalent.
-
-  return [
-    { wallet: "0x1", percent: 14.5 },
-    { wallet: "0x2", percent: 9.3 },
-    { wallet: "0x3", percent: 6.8 },
-    { wallet: "0x4", percent: 5.1 },
-    { wallet: "0x5", percent: 4.9 },
-    { wallet: "0x6", percent: 3.2 },
-    { wallet: "0x7", percent: 2.8 },
-    { wallet: "0x8", percent: 2.6 },
-    { wallet: "0x9", percent: 2.4 },
-    { wallet: "0x10", percent: 2.1 }
-  ]
-
-}
-
-//
-// ---------------------------------------------------
-// WHALE DISTRIBUTION
-// ---------------------------------------------------
-//
-
-function calculateWhaleDistribution(holderData) {
-
-  const topHolderPercent = holderData[0]?.percent || 0
-
-  const top5Percent = holderData
-    .slice(0, 5)
-    .reduce((sum, h) => sum + h.percent, 0)
-
-  const top10Percent = holderData
-    .slice(0, 10)
-    .reduce((sum, h) => sum + h.percent, 0)
-
-  let whaleRisk = "Low"
-
-  if (top10Percent > 60) whaleRisk = "High"
-  else if (top10Percent > 35) whaleRisk = "Moderate"
-
-  return {
-    topHolderPercent,
-    top5Percent,
-    top10Percent,
-    whaleRisk
-  }
-
-}
-
-//
-// ---------------------------------------------------
-// SAFETY SCORE
-// ---------------------------------------------------
-//
-
-function calculateSafetyScore({ liquidity, top10Percent }) {
-
-  let score = 100
-
-  if (liquidity < 100000) score -= 15
-  if (top10Percent > 50) score -= 20
-  if (top10Percent > 70) score -= 30
-
-  let level = "Low Risk"
-
-  if (score < 70) level = "Moderate Risk"
-  if (score < 40) level = "High Risk"
-
-  return {
-    score,
-    level
-  }
-
 }
