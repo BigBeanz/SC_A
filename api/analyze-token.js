@@ -3,10 +3,6 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
-// --------------------------------
-// SIMPLE IN-MEMORY CACHE
-// --------------------------------
-
 const CACHE_TTL_MS = 30 * 1000
 const RESPONSE_CACHE = new Map()
 
@@ -94,9 +90,9 @@ export default async function handler(req, res) {
 
     const pair = dexResult?.pair || null
 
-    // --------------------------------
-    // TOKEN IDENTITY
-    // --------------------------------
+    if (!pair) {
+      return res.status(404).json({ error: "No liquidity pair found" })
+    }
 
     const tokenName =
       pair?.baseToken?.name ||
@@ -107,10 +103,6 @@ export default async function handler(req, res) {
       pair?.baseToken?.symbol ||
       pulseMetaResult?.symbol ||
       "UNKNOWN"
-
-    // --------------------------------
-    // MARKET DATA
-    // --------------------------------
 
     const price = safeNumber(pair?.priceUsd)
     const liquidityUSD = safeNumber(pair?.liquidity?.usd)
@@ -134,10 +126,6 @@ export default async function handler(req, res) {
     const fdv = safeNumber(pair?.fdv)
     const scanTime = new Date().toISOString()
 
-    // --------------------------------
-    // SECURITY + HOLDERS
-    // --------------------------------
-
     const securityData = {
       ...DEFAULT_SECURITY_DATA,
       ...(goplusResult || {}),
@@ -152,10 +140,6 @@ export default async function handler(req, res) {
       securityData.holderCount = pulseHolderResult.holderCount
     }
 
-    // --------------------------------
-    // PRE-CALCULATED METRICS
-    // --------------------------------
-
     const liqRatio =
       marketCap > 0 ? liquidityUSD / marketCap : null
 
@@ -165,14 +149,10 @@ export default async function handler(req, res) {
     const sellPressure =
       buys24h + sells24h > 0 ? sells24h / (buys24h + sells24h) : null
 
-    // --------------------------------
-    // RISK SCORE
-    // --------------------------------
-
     let score = 0
     const riskSignalSet = new Set()
 
-    // Contract risks
+    // CONTRACT RISKS
 
     if (securityData.honeypot === true) {
       score += 40
@@ -182,11 +162,6 @@ export default async function handler(req, res) {
     if (securityData.cannotSellAll === true) {
       score += 40
       riskSignalSet.add("cannotSellAll")
-    }
-
-    if (securityData.cannotBuy === true) {
-      score += 25
-      riskSignalSet.add("cannotBuy")
     }
 
     if (securityData.mintable === true) {
@@ -199,56 +174,21 @@ export default async function handler(req, res) {
       riskSignalSet.add("ownerRenounced")
     }
 
-    if (securityData.hiddenOwner === true) {
-      score += 20
-      riskSignalSet.add("hiddenOwner")
-    }
-
-    if (securityData.selfDestruct === true) {
-      score += 20
-      riskSignalSet.add("selfDestruct")
-    }
-
-    if (securityData.blacklist === true) {
-      score += 10
-      riskSignalSet.add("blacklist")
-    }
-
-    if (securityData.transferPausable === true) {
-      score += 10
-      riskSignalSet.add("transferPausable")
-    }
-
-    if (securityData.proxyContract === true) {
-      score += 8
-      riskSignalSet.add("proxyContract")
-    }
-
-    if (securityData.canTakeBackOwnership === true) {
-      score += 15
-      riskSignalSet.add("canTakeBackOwnership")
-    }
-
     if ((securityData.sellTax ?? 0) > 10) {
       score += 10
       riskSignalSet.add("highSellTax")
     }
 
-    // Liquidity risks
+    // LIQUIDITY RISKS
 
     if (liquidityUSD < 10000) {
       score += 20
       riskSignalSet.add("lowLiquidity")
     }
 
-    if (liqRatio !== null) {
-      if (liqRatio < 0.02) {
-        score += 25
-        riskSignalSet.add("extremeLiquidityRisk")
-      } else if (liqRatio < 0.05) {
-        score += 15
-        riskSignalSet.add("lowLiquiditySupport")
-      }
+    if (liqRatio !== null && liqRatio < 0.02) {
+      score += 25
+      riskSignalSet.add("extremeLiquidityRisk")
     }
 
     if (volRatio !== null && volRatio > 8) {
@@ -256,16 +196,11 @@ export default async function handler(req, res) {
       riskSignalSet.add("washTradingSuspected")
     }
 
-    // Whale concentration
+    // WHALE RISKS
 
     if ((holderData.topHolderPercent ?? 0) > 20) {
       score += 10
       riskSignalSet.add("highTopHolderConcentration")
-    }
-
-    if ((holderData.top5Percent ?? 0) > 40) {
-      score += 25
-      riskSignalSet.add("whaleConcentration")
     }
 
     if ((holderData.top10Percent ?? 0) > 60) {
@@ -273,13 +208,11 @@ export default async function handler(req, res) {
       riskSignalSet.add("extremeWhaleControl")
     }
 
-    // --------------------------------
-    // LAYER 2: MARKET HEALTH SIGNALS
-    // --------------------------------
+    // MARKET HEALTH LAYER
 
     if (priceChange24h !== null) {
 
-      const drop = Math.abs(Math.min(0, priceChange24h))
+      const drop = Math.abs(Math.min(0, Number(priceChange24h)))
 
       if (drop >= 50) {
         score += 30
@@ -370,10 +303,6 @@ export default async function handler(req, res) {
 
     const riskSignals = Array.from(riskSignalSet)
 
-    // --------------------------------
-    // RESPONSE
-    // --------------------------------
-
     const responsePayload = {
 
       tokenName,
@@ -417,9 +346,7 @@ export default async function handler(req, res) {
     console.error("Analyzer error:", error)
 
     return res.status(500).json({
-      error: "Analyzer failed"
+      error: "Analyzer failed",
     })
-
   }
-
 }
