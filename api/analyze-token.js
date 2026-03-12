@@ -1,8 +1,8 @@
 export default async function handler(req, res) {
 
-  // -----------------------------
-  // CORS (required for frontend)
-  // -----------------------------
+  // --------------------------------
+  // CORS
+  // --------------------------------
 
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -21,42 +21,53 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing contractAddress" })
     }
 
-    // -----------------------------
-    // Fetch DexScreener data
-    // -----------------------------
+    // --------------------------------
+    // DexScreener Fetch
+    // --------------------------------
 
     const dexUrl = `https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`
 
-    const dexResponse = await fetch(dexUrl)
-    const dexData = await dexResponse.json()
+    const dexRes = await fetch(dexUrl)
+    const dexData = await dexRes.json()
 
-    // IMPORTANT FIX:
-    // Select the pair that matches the requested chain
+    const pairs = dexData?.pairs || []
+
+    // --------------------------------
+    // Select correct chain pairs
+    // --------------------------------
+
+    const chainPairs = pairs.filter(p => p.chainId === chain)
+
+    // --------------------------------
+    // Select highest liquidity pair
+    // --------------------------------
 
     const pair =
-      dexData?.pairs?.find(p => p.chainId === chain) ||
-      dexData?.pairs?.[0]
+      chainPairs.sort(
+        (a,b) => (b?.liquidity?.usd || 0) - (a?.liquidity?.usd || 0)
+      )[0] ||
+      pairs[0]
 
-    // -----------------------------
-    // Basic market data
-    // -----------------------------
+    // --------------------------------
+    // Market Data
+    // --------------------------------
 
     const tokenName = pair?.baseToken?.name || "Unknown Token"
     const tokenSymbol = pair?.baseToken?.symbol || "UNKNOWN"
 
-    const price = pair?.priceUsd || 0
-    const liquidityUSD = pair?.liquidity?.usd || 0
-    const marketCap = pair?.fdv || 0
-    const volume24h = pair?.volume?.h24 || 0
+    const price = parseFloat(pair?.priceUsd || 0)
+    const liquidityUSD = parseFloat(pair?.liquidity?.usd || 0)
+    const marketCap = parseFloat(pair?.fdv || 0)
+    const volume24h = parseFloat(pair?.volume?.h24 || 0)
 
     const buys24h = pair?.txns?.h24?.buys || 0
     const sells24h = pair?.txns?.h24?.sells || 0
 
     const dexName = pair?.dexId || "unknown"
 
-    // -----------------------------
-    // Chain mapping for APIs
-    // -----------------------------
+    // --------------------------------
+    // Chain map for APIs
+    // --------------------------------
 
     const chainMap = {
       ethereum: { moralis: "eth", goplus: "1" },
@@ -68,9 +79,9 @@ export default async function handler(req, res) {
     const moralisChain = chainMap[chain]?.moralis || null
     const goplusChain = chainMap[chain]?.goplus || null
 
-    // -----------------------------
-    // GoPlus security scan
-    // -----------------------------
+    // --------------------------------
+    // GoPlus Security
+    // --------------------------------
 
     let securityData = {}
 
@@ -136,9 +147,9 @@ export default async function handler(req, res) {
 
     }
 
-    // -----------------------------
-    // Moralis holder distribution
-    // -----------------------------
+    // --------------------------------
+    // Moralis Holder Distribution
+    // --------------------------------
 
     let holderData = {
       topHolderPercent: null,
@@ -198,9 +209,9 @@ export default async function handler(req, res) {
 
     }
 
-    // -----------------------------
-    // Risk scoring
-    // -----------------------------
+    // --------------------------------
+    // Risk Score
+    // --------------------------------
 
     let score = 0
 
@@ -232,9 +243,9 @@ export default async function handler(req, res) {
       : score >= 15 ? "B"
       : "A"
 
-    // -----------------------------
-    // API RESPONSE
-    // -----------------------------
+    // --------------------------------
+    // Response
+    // --------------------------------
 
     return res.status(200).json({
 
