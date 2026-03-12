@@ -1,187 +1,358 @@
 export default async function handler(req, res) {
 
-res.setHeader("Access-Control-Allow-Origin","*")
+  // -----------------------------
+  // CORS HEADERS
+  // -----------------------------
 
-if(req.method!=="POST")
-return res.status(405).json({error:"Method not allowed"})
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type")
 
-try{
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end()
+  }
 
-const {address}=req.body
-const token=address.toLowerCase()
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" })
+  }
 
-const ETHERSCAN_API_KEY=process.env.ETHERSCAN_API_KEY
+  try {
 
-const [goplusRes,dexRes,holdersRes,creationRes]=await Promise.all([
+    const { address } = req.body
 
-fetch(`https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${token}`),
+    if (!address) {
+      return res.status(400).json({ error: "Missing contract address" })
+    }
 
-fetch(`https://api.dexscreener.com/latest/dex/tokens/${token}`),
+    const token = address.toLowerCase()
+    const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
 
-fetch(`https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${token}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`),
+    // -----------------------------
+    // Fetch APIs
+    // -----------------------------
 
-fetch(`https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${token}&apikey=${ETHERSCAN_API_KEY}`)
+    const [goplusRes, dexRes, holdersRes, creationRes] = await Promise.all([
 
-])
+      fetch(
+        `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${token}`
+      ),
 
-const goplus=await goplusRes.json()
-const dex=await dexRes.json()
-const holders=await holdersRes.json()
-const creation=await creationRes.json()
+      fetch(
+        `https://api.dexscreener.com/latest/dex/tokens/${token}`
+      ),
 
-const security=goplus?.result?.[token]||{}
-const pair=dex?.pairs?.[0]||{}
+      fetch(
+        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${token}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`
+      ),
 
-const liquidityUSD=Number(pair?.liquidity?.usd||0)
-const marketCap=Number(pair?.fdv||0)
-const volume24h=Number(pair?.volume?.h24||0)
-const price=Number(pair?.priceUsd||0)
+      fetch(
+        `https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${token}&apikey=${ETHERSCAN_API_KEY}`
+      )
 
-const buyTax=Number(security.buy_tax||0)
-const sellTax=Number(security.sell_tax||0)
+    ])
 
-const honeypot=security.is_honeypot==="1"
-const mintable=security.is_mintable==="1"
-const proxyContract=security.is_proxy==="1"
+    const goplus = await goplusRes.json()
+    const dex = await dexRes.json()
+    const holders = await holdersRes.json()
+    const creation = await creationRes.json()
 
-const ownerRenounced=
-security.owner_address==="0x0000000000000000000000000000000000000000"
+    const security = goplus?.result?.[token] || {}
+    const pair = dex?.pairs?.[0] || {}
 
-let contractAgeDays=null
+    // -----------------------------
+    // Metadata
+    // -----------------------------
 
-if(creation?.result?.length){
+    const tokenName =
+      pair?.baseToken?.name ||
+      security.token_name ||
+      "Unknown Token"
 
-const txHash=creation.result[0].txHash
+    const tokenSymbol =
+      pair?.baseToken?.symbol ||
+      ""
 
-const txRes=await fetch(
-`https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${ETHERSCAN_API_KEY}`
-)
+    // -----------------------------
+    // Market Data
+    // -----------------------------
 
-const tx=await txRes.json()
-const block=tx?.result?.blockNumber
+    const liquidityUSD = Number(pair?.liquidity?.usd || 0)
+    const marketCap = Number(pair?.fdv || 0)
+    const volume24h = Number(pair?.volume?.h24 || 0)
+    const price = Number(pair?.priceUsd || 0)
 
-if(block){
+    // -----------------------------
+    // Tokenomics
+    // -----------------------------
 
-const blockRes=await fetch(
-`https://api.etherscan.io/api?module=proxy&action=eth_getBlockByNumber&tag=${block}&boolean=true&apikey=${ETHERSCAN_API_KEY}`
-)
+    const buyTax = Number(security.buy_tax || 0)
+    const sellTax = Number(security.sell_tax || 0)
 
-const blockData=await blockRes.json()
-const timestamp=parseInt(blockData?.result?.timestamp,16)*1000
+    // -----------------------------
+    // Security Flags
+    // -----------------------------
 
-contractAgeDays=(Date.now()-timestamp)/86400000
+    const honeypot = security.is_honeypot === "1"
+    const mintable = security.is_mintable === "1"
+    const proxyContract = security.is_proxy === "1"
 
-}
+    const ownerRenounced =
+      security.owner_address ===
+      "0x0000000000000000000000000000000000000000"
 
-}
+    // -----------------------------
+    // Contract Age
+    // -----------------------------
 
-let topHolderPercent=0
-let top10Percent=0
+    let contractAgeDays = null
 
-if(holders?.result){
+    if (creation?.result?.length) {
 
-const total=holders.result.reduce(
-(a,h)=>a+Number(h.TokenHolderQuantity),0)
+      const txHash = creation.result[0].txHash
 
-holders.result.forEach((h,i)=>{
+      const txRes = await fetch(
+        `https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${ETHERSCAN_API_KEY}`
+      )
 
-const pct=Number(h.TokenHolderQuantity)/total*100
+      const tx = await txRes.json()
+      const blockNumber = tx?.result?.blockNumber
 
-if(i===0)topHolderPercent=pct
+      if (blockNumber) {
 
-if(i<10)top10Percent+=pct
+        const blockRes = await fetch(
+          `https://api.etherscan.io/api?module=proxy&action=eth_getBlockByNumber&tag=${blockNumber}&boolean=true&apikey=${ETHERSCAN_API_KEY}`
+        )
 
-})
+        const block = await blockRes.json()
+        const timestampHex = block?.result?.timestamp
 
-}
+        if (timestampHex) {
 
-let liquidityRatio=marketCap>0?liquidityUSD/marketCap:0
-let volumePressure=liquidityUSD>0?volume24h/liquidityUSD:0
+          const timestamp = parseInt(timestampHex, 16) * 1000
+          contractAgeDays = (Date.now() - timestamp) / 86400000
 
-let riskScore=0
-const riskSignals=[]
+        }
 
-function addRisk(key,points,title,desc){
+      }
 
-riskScore+=points
+    }
 
-riskSignals.push({key,title,desc})
+    // -----------------------------
+    // Holder Concentration
+    // -----------------------------
 
-}
+    let topHolderPercent = 0
+    let top10Percent = 0
 
-if(honeypot)addRisk("honeypot",80,"Honeypot detected","Token may block selling.")
+    if (holders?.result) {
 
-if(mintable)addRisk("mint",15,"Mint function enabled","Supply can increase.")
+      const total = holders.result.reduce(
+        (a, h) => a + Number(h.TokenHolderQuantity || 0), 0
+      )
 
-if(!ownerRenounced)addRisk("owner",10,"Owner active","Developer retains control.")
+      holders.result.forEach((h, i) => {
 
-if(proxyContract)addRisk("proxy",8,"Upgradeable contract","Contract logic can change.")
+        const pct =
+          Number(h.TokenHolderQuantity || 0) /
+          total * 100
 
-if(liquidityUSD<25000)addRisk("lowLiquidity",20,"Low liquidity","Price easily manipulated.")
+        if (i === 0) topHolderPercent = pct
+        if (i < 10) top10Percent += pct
 
-if(liquidityRatio<0.01)addRisk("liqRatio",20,"Liquidity ratio low","Liquidity small vs market cap.")
+      })
 
-if(volumePressure>10)addRisk("volume",15,"Extreme trading pressure","Pump/dump risk.")
+    }
 
-if(contractAgeDays!==null&&contractAgeDays<7)
-addRisk("newContract",20,"New contract","Recently deployed.")
+    // -----------------------------
+    // Market Metrics
+    // -----------------------------
 
-if(topHolderPercent>25)
-addRisk("whale",25,"Large whale holder","Top wallet holds large supply.")
+    const liquidityRatio =
+      marketCap > 0 ? liquidityUSD / marketCap : 0
+
+    const volumePressure =
+      liquidityUSD > 0 ? volume24h / liquidityUSD : 0
+
+    // -----------------------------
+    // Risk Engine
+    // -----------------------------
+
+    let riskScore = 0
+    const riskSignals = []
+
+    function addRisk(key, points, title, description) {
+
+      riskScore += points
+
+      riskSignals.push({
+        key,
+        title,
+        description
+      })
+
+    }
+
+    // Honeypot logic
+    if (honeypot && sellTax > 20)
+      addRisk(
+        "honeypot",
+        80,
+        "Possible honeypot",
+        "Security scanner detected honeypot behavior."
+      )
+
+    else if (honeypot)
+      addRisk(
+        "honeypotWarning",
+        25,
+        "Honeypot warning",
+        "Security API flagged possible honeypot behavior."
+      )
+
+    if (mintable)
+      addRisk(
+        "mint",
+        15,
+        "Mint function enabled",
+        "Supply can increase."
+      )
+
+    if (!ownerRenounced)
+      addRisk(
+        "owner",
+        10,
+        "Owner active",
+        "Developer retains control."
+      )
+
+    if (proxyContract)
+      addRisk(
+        "proxy",
+        8,
+        "Upgradeable contract",
+        "Logic can change."
+      )
+
+    if (liquidityUSD < 25000)
+      addRisk(
+        "lowLiquidity",
+        20,
+        "Low liquidity",
+        "Price easily manipulated."
+      )
+
+    if (liquidityRatio < 0.01)
+      addRisk(
+        "liqRatio",
+        20,
+        "Liquidity ratio low",
+        "Liquidity small vs market cap."
+      )
 
-if(top10Percent>60)
-addRisk("whales",20,"High concentration","Top 10 wallets control supply.")
+    if (volumePressure > 10)
+      addRisk(
+        "volume",
+        15,
+        "Extreme trading pressure",
+        "Pump/dump risk."
+      )
 
-if(sellTax>20)
-addRisk("sellTax",30,"Extreme sell tax","Selling heavily penalized.")
+    if (contractAgeDays !== null && contractAgeDays < 7)
+      addRisk(
+        "newContract",
+        20,
+        "New contract",
+        "Recently deployed token."
+      )
 
-if(riskScore>100)riskScore=100
+    if (topHolderPercent > 25)
+      addRisk(
+        "whale",
+        25,
+        "Large whale holder",
+        "Top wallet holds large supply."
+      )
 
-let riskLevel="Low Risk"
+    if (top10Percent > 60)
+      addRisk(
+        "whales",
+        20,
+        "High concentration",
+        "Top 10 wallets control supply."
+      )
 
-if(riskScore>=80)riskLevel="Extreme Risk"
-else if(riskScore>=60)riskLevel="High Risk"
-else if(riskScore>=40)riskLevel="Moderate Risk"
+    if (sellTax > 20)
+      addRisk(
+        "sellTax",
+        30,
+        "Extreme sell tax",
+        "Selling heavily penalized."
+      )
 
-return res.status(200).json({
+    if (riskScore > 100) riskScore = 100
 
-tokenName:pair?.baseToken?.name||"Unknown Token",
-tokenSymbol:pair?.baseToken?.symbol||"",
-tokenAddress:token,
+    // -----------------------------
+    // Risk Level
+    // -----------------------------
 
-riskScore,
-riskLevel,
+    let riskLevel = "Low Risk"
 
-contractAgeDays,
+    if (riskScore >= 80)
+      riskLevel = "Extreme Risk"
+    else if (riskScore >= 60)
+      riskLevel = "High Risk"
+    else if (riskScore >= 40)
+      riskLevel = "Moderate Risk"
 
-topHolderPercent,
-top10Percent,
+    // -----------------------------
+    // Response
+    // -----------------------------
 
-liquidityUSD,
-marketCap,
-volume24h,
-price,
+    return res.status(200).json({
 
-buyTax,
-sellTax,
+      tokenName,
+      tokenSymbol,
+      tokenAddress: token,
 
-honeypot,
-mintable,
-ownerRenounced,
-proxyContract,
+      riskScore,
+      riskLevel,
 
-riskSignals,
+      contractAgeDays,
 
-scanTime:new Date().toISOString()
+      topHolderPercent,
+      top10Percent,
 
-})
+      liquidityUSD,
+      marketCap,
+      volume24h,
+      price,
 
-}catch(err){
+      buyTax,
+      sellTax,
 
-console.error(err)
+      honeypot,
+      mintable,
+      ownerRenounced,
+      proxyContract,
 
-return res.status(500).json({error:"Analyzer failed"})
+      liquidityRatio,
+      volumePressure,
 
-}
+      riskSignals,
+
+      scanTime: new Date().toISOString()
+
+    })
+
+  } catch (err) {
+
+    console.error(err)
+
+    return res.status(500).json({
+      error: "Analyzer failed"
+    })
+
+  }
 
 }
