@@ -1,14 +1,13 @@
 export default async function handler(req, res) {
 
-  // -----------------------------
-  // CORS HEADERS
-  // -----------------------------
+  // -------------------------
+  // CORS
+  // -------------------------
 
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
 
-  // Handle preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end()
   }
@@ -28,11 +27,11 @@ export default async function handler(req, res) {
     const token = address.toLowerCase()
     const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
 
-    // -----------------------------
-    // Fetch APIs
-    // -----------------------------
+    // -------------------------
+    // FETCH APIs
+    // -------------------------
 
-    const [goplusRes, dexRes, holdersRes, creationRes] = await Promise.all([
+    const [goplusRes, dexRes, creationRes] = await Promise.all([
 
       fetch(
         `https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=${token}`
@@ -43,10 +42,6 @@ export default async function handler(req, res) {
       ),
 
       fetch(
-        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${token}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`
-      ),
-
-      fetch(
         `https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${token}&apikey=${ETHERSCAN_API_KEY}`
       )
 
@@ -54,15 +49,14 @@ export default async function handler(req, res) {
 
     const goplus = await goplusRes.json()
     const dex = await dexRes.json()
-    const holders = await holdersRes.json()
     const creation = await creationRes.json()
 
     const security = goplus?.result?.[token] || {}
     const pair = dex?.pairs?.[0] || {}
 
-    // -----------------------------
-    // Metadata
-    // -----------------------------
+    // -------------------------
+    // TOKEN METADATA
+    // -------------------------
 
     const tokenName =
       pair?.baseToken?.name ||
@@ -73,25 +67,25 @@ export default async function handler(req, res) {
       pair?.baseToken?.symbol ||
       ""
 
-    // -----------------------------
-    // Market Data
-    // -----------------------------
+    // -------------------------
+    // MARKET DATA
+    // -------------------------
 
     const liquidityUSD = Number(pair?.liquidity?.usd || 0)
     const marketCap = Number(pair?.fdv || 0)
     const volume24h = Number(pair?.volume?.h24 || 0)
     const price = Number(pair?.priceUsd || 0)
 
-    // -----------------------------
-    // Tokenomics
-    // -----------------------------
+    // -------------------------
+    // TOKENOMICS
+    // -------------------------
 
     const buyTax = Number(security.buy_tax || 0)
     const sellTax = Number(security.sell_tax || 0)
 
-    // -----------------------------
-    // Security Flags
-    // -----------------------------
+    // -------------------------
+    // SECURITY FLAGS
+    // -------------------------
 
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
@@ -101,13 +95,13 @@ export default async function handler(req, res) {
       security.owner_address ===
       "0x0000000000000000000000000000000000000000"
 
-    // -----------------------------
-    // Contract Age
-    // -----------------------------
+    // -------------------------
+    // CONTRACT AGE
+    // -------------------------
 
     let contractAgeDays = null
 
-    if (creation?.result?.length) {
+    if (creation?.result?.length > 0) {
 
       const txHash = creation.result[0].txHash
 
@@ -116,6 +110,7 @@ export default async function handler(req, res) {
       )
 
       const tx = await txRes.json()
+
       const blockNumber = tx?.result?.blockNumber
 
       if (blockNumber) {
@@ -125,12 +120,16 @@ export default async function handler(req, res) {
         )
 
         const block = await blockRes.json()
+
         const timestampHex = block?.result?.timestamp
 
         if (timestampHex) {
 
-          const timestamp = parseInt(timestampHex, 16) * 1000
-          contractAgeDays = (Date.now() - timestamp) / 86400000
+          const timestamp =
+            parseInt(timestampHex, 16) * 1000
+
+          contractAgeDays =
+            (Date.now() - timestamp) / 86400000
 
         }
 
@@ -138,35 +137,9 @@ export default async function handler(req, res) {
 
     }
 
-    // -----------------------------
-    // Holder Concentration
-    // -----------------------------
-
-    let topHolderPercent = 0
-    let top10Percent = 0
-
-    if (holders?.result) {
-
-      const total = holders.result.reduce(
-        (a, h) => a + Number(h.TokenHolderQuantity || 0), 0
-      )
-
-      holders.result.forEach((h, i) => {
-
-        const pct =
-          Number(h.TokenHolderQuantity || 0) /
-          total * 100
-
-        if (i === 0) topHolderPercent = pct
-        if (i < 10) top10Percent += pct
-
-      })
-
-    }
-
-    // -----------------------------
-    // Market Metrics
-    // -----------------------------
+    // -------------------------
+    // MARKET METRICS
+    // -------------------------
 
     const liquidityRatio =
       marketCap > 0 ? liquidityUSD / marketCap : 0
@@ -174,9 +147,9 @@ export default async function handler(req, res) {
     const volumePressure =
       liquidityUSD > 0 ? volume24h / liquidityUSD : 0
 
-    // -----------------------------
-    // Risk Engine
-    // -----------------------------
+    // -------------------------
+    // RISK ENGINE
+    // -------------------------
 
     let riskScore = 0
     const riskSignals = []
@@ -193,7 +166,8 @@ export default async function handler(req, res) {
 
     }
 
-    // Honeypot logic
+    // Honeypot detection
+
     if (honeypot && sellTax > 20)
       addRisk(
         "honeypot",
@@ -209,6 +183,8 @@ export default async function handler(req, res) {
         "Honeypot warning",
         "Security API flagged possible honeypot behavior."
       )
+
+    // Contract risks
 
     if (mintable)
       addRisk(
@@ -231,8 +207,10 @@ export default async function handler(req, res) {
         "proxy",
         8,
         "Upgradeable contract",
-        "Logic can change."
+        "Contract logic can change."
       )
+
+    // Liquidity risks
 
     if (liquidityUSD < 25000)
       addRisk(
@@ -250,6 +228,8 @@ export default async function handler(req, res) {
         "Liquidity small vs market cap."
       )
 
+    // Market manipulation
+
     if (volumePressure > 10)
       addRisk(
         "volume",
@@ -257,6 +237,8 @@ export default async function handler(req, res) {
         "Extreme trading pressure",
         "Pump/dump risk."
       )
+
+    // Contract age risk
 
     if (contractAgeDays !== null && contractAgeDays < 7)
       addRisk(
@@ -266,21 +248,7 @@ export default async function handler(req, res) {
         "Recently deployed token."
       )
 
-    if (topHolderPercent > 25)
-      addRisk(
-        "whale",
-        25,
-        "Large whale holder",
-        "Top wallet holds large supply."
-      )
-
-    if (top10Percent > 60)
-      addRisk(
-        "whales",
-        20,
-        "High concentration",
-        "Top 10 wallets control supply."
-      )
+    // Tax traps
 
     if (sellTax > 20)
       addRisk(
@@ -292,9 +260,9 @@ export default async function handler(req, res) {
 
     if (riskScore > 100) riskScore = 100
 
-    // -----------------------------
-    // Risk Level
-    // -----------------------------
+    // -------------------------
+    // RISK LEVEL
+    // -------------------------
 
     let riskLevel = "Low Risk"
 
@@ -305,9 +273,9 @@ export default async function handler(req, res) {
     else if (riskScore >= 40)
       riskLevel = "Moderate Risk"
 
-    // -----------------------------
-    // Response
-    // -----------------------------
+    // -------------------------
+    // RESPONSE
+    // -------------------------
 
     return res.status(200).json({
 
@@ -319,9 +287,6 @@ export default async function handler(req, res) {
       riskLevel,
 
       contractAgeDays,
-
-      topHolderPercent,
-      top10Percent,
 
       liquidityUSD,
       marketCap,
@@ -347,7 +312,7 @@ export default async function handler(req, res) {
 
   } catch (err) {
 
-    console.error(err)
+    console.error("ANALYZER ERROR:", err)
 
     return res.status(500).json({
       error: "Analyzer failed"
