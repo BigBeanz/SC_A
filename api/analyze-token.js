@@ -11,247 +11,232 @@ export default async function handler(req, res) {
   try {
 
     const contractAddress = req.body?.contractAddress || req.body?.address
+    const chain = req.body?.chain || "ethereum"
 
     if (!contractAddress) {
       return res.status(400).json({ error: "Missing contractAddress" })
     }
 
-    const chainId = 1
-    const chain = "eth"
+    const dexUrl = `https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`
 
-    const bool = (val) => val === "1" ? true : val === "0" ? false : null
-    const pct  = (val) => val !== undefined && val !== null ? parseFloat(val) : null
+    const dexResponse = await fetch(dexUrl)
+    const dexData = await dexResponse.json()
 
-    async function fetchDexScreener(address) {
-      try {
-        const url = `https://api.dexscreener.com/latest/dex/tokens/${address}`
-        const r = await fetch(url)
-        const data = await r.json()
-        return data?.pairs?.[0] || null
-      } catch {
-        return null
+    const pair = dexData?.pairs?.[0]
+
+    const tokenName = pair?.baseToken?.name || "Unknown Token"
+    const tokenSymbol = pair?.baseToken?.symbol || "UNKNOWN"
+    const priceUsd = pair?.priceUsd || 0
+    const marketCap = pair?.fdv || 0
+    const liquidity = pair?.liquidity?.usd || 0
+    const volume24h = pair?.volume?.h24 || 0
+
+    const buys24h = pair?.txns?.h24?.buys || 0
+    const sells24h = pair?.txns?.h24?.sells || 0
+
+    const dexName = pair?.dexId || "unknown"
+
+    // -------------------------
+    // CHAIN MAPPING
+    // -------------------------
+
+    const chainMap = {
+      ethereum: {
+        moralis: "eth",
+        goplus: "1"
+      },
+      bsc: {
+        moralis: "bsc",
+        goplus: "56"
+      },
+      polygon: {
+        moralis: "polygon",
+        goplus: "137"
+      },
+      arbitrum: {
+        moralis: "arbitrum",
+        goplus: "42161"
       }
     }
 
-    async function fetchGoPlus(address) {
+    const moralisChain = chainMap[chain]?.moralis || null
+    const goplusChain = chainMap[chain]?.goplus || null
+
+    // -------------------------
+    // GOPLUS SECURITY
+    // -------------------------
+
+    let securityData = {}
+
+    if (goplusChain) {
+
       try {
-        const url = `https://api.gopluslabs.io/api/v1/token_security/${chainId}?contract_addresses=${address}`
-        const r = await fetch(url)
-        const data = await r.json()
-        return data?.result?.[address.toLowerCase()] || null
-      } catch {
-        return null
+
+        const goplusUrl =
+          `https://api.gopluslabs.io/api/v1/token_security/${goplusChain}?contract_addresses=${contractAddress}`
+
+        const goplusRes = await fetch(goplusUrl)
+        const goplusJson = await goplusRes.json()
+
+        const tokenSecurity = goplusJson?.result?.[contractAddress.toLowerCase()] || {}
+
+        const bool = (v) => v === "1"
+        const pct = (v) => v ? parseFloat(v) : 0
+
+        securityData = {
+
+          honeypot: bool(tokenSecurity.is_honeypot),
+          mintable: bool(tokenSecurity.is_mintable),
+          blacklist: bool(tokenSecurity.is_blacklisted),
+          ownerRenounced: tokenSecurity.owner_address === "0x0000000000000000000000000000000000000000",
+          transferPausable: bool(tokenSecurity.transfer_pausable),
+          proxyContract: bool(tokenSecurity.is_proxy),
+          selfDestruct: bool(tokenSecurity.selfdestruct),
+          hiddenOwner: bool(tokenSecurity.hidden_owner),
+          canTakeBackOwnership: bool(tokenSecurity.can_take_back_ownership),
+          slippageModifiable: bool(tokenSecurity.slippage_modifiable),
+          tradingCooldown: bool(tokenSecurity.trading_cooldown),
+          externalCall: bool(tokenSecurity.external_call),
+          cannotBuy: bool(tokenSecurity.cannot_buy),
+          cannotSellAll: bool(tokenSecurity.cannot_sell_all),
+          buyTax: pct(tokenSecurity.buy_tax),
+          sellTax: pct(tokenSecurity.sell_tax),
+          ownerAddress: tokenSecurity.owner_address || null,
+          creatorAddress: tokenSecurity.creator_address || null,
+          holderCount: parseInt(tokenSecurity.holder_count || 0),
+          isOpenSource: bool(tokenSecurity.is_open_source),
+          ownerChangeBalance: bool(tokenSecurity.owner_change_balance),
+          isWhitelisted: bool(tokenSecurity.is_in_dex)
+
+        }
+
+      } catch (e) {
+        console.error("GoPlus error", e)
       }
+
     }
 
-    async function fetchMoralis(address) {
+    // -------------------------
+    // MORALIS HOLDERS
+    // -------------------------
+
+    let holderData = {
+      topHolderPercent: null,
+      top5Percent: null,
+      top10Percent: null,
+      whaleRisk: null
+    }
+
+    if (moralisChain && process.env.MORALIS_API_KEY) {
+
       try {
 
-        if (!process.env.MORALIS_API_KEY) return null
+        const moralisUrl =
+          `https://deep-index.moralis.io/api/v2.2/erc20/${contractAddress}/owners?chain=${moralisChain}&limit=10`
 
-        const url = `https://deep-index.moralis.io/api/v2.2/erc20/${address}/owners?chain=${chain}&limit=10`
-
-        const r = await fetch(url, {
+        const moralisRes = await fetch(moralisUrl, {
           headers: {
             "X-API-Key": process.env.MORALIS_API_KEY
           }
         })
 
-        const data = await r.json()
+        const moralisJson = await moralisRes.json()
 
-        return data?.result || null
+        const holders = moralisJson?.result || []
 
-      } catch {
-        return null
+        if (holders.length) {
+
+          const topHolderPercent = holders[0]?.percentage || 0
+
+          const top5Percent = holders
+            .slice(0, 5)
+            .reduce((sum, h) => sum + (h.percentage || 0), 0)
+
+          const top10Percent = holders
+            .slice(0, 10)
+            .reduce((sum, h) => sum + (h.percentage || 0), 0)
+
+          let whaleRisk = "Healthy"
+
+          if (top10Percent > 60) whaleRisk = "High"
+          else if (top10Percent > 40) whaleRisk = "Moderate"
+
+          holderData = {
+            topHolderPercent,
+            top5Percent,
+            top10Percent,
+            whaleRisk
+          }
+
+        }
+
+      } catch (e) {
+        console.error("Moralis error", e)
       }
+
     }
 
-    async function fetchContractAge(address) {
-
-      try {
-
-        if (!process.env.ETHERSCAN_API_KEY) return null
-
-        const url = `https://api.etherscan.io/api?module=contract&action=getcontractcreation&contractaddresses=${address}&apikey=${process.env.ETHERSCAN_API_KEY}`
-
-        const r = await fetch(url)
-        const data = await r.json()
-
-        const block = data?.result?.[0]?.blockNumber
-        const timestamp = data?.result?.[0]?.timestamp
-
-        if (!timestamp) return null
-
-        const deployTime = Number(timestamp) * 1000
-        const ageDays = (Date.now() - deployTime) / 86400000
-
-        return Math.floor(ageDays)
-
-      } catch {
-        return null
-      }
-    }
-
-    const [pair, goplus, moralis] = await Promise.all([
-      fetchDexScreener(contractAddress),
-      fetchGoPlus(contractAddress),
-      fetchMoralis(contractAddress)
-    ])
-
-    const contractAgeDays = await fetchContractAge(contractAddress)
-
-    const tokenName = pair?.baseToken?.name || "Unknown Token"
-    const tokenSymbol = pair?.baseToken?.symbol || "UNKNOWN"
-
-    const price = parseFloat(pair?.priceUsd || 0)
-    const liquidityUSD = pair?.liquidity?.usd || 0
-    const marketCap = pair?.fdv || 0
-    const volume24h = pair?.volume?.h24 || 0
-
-    const buys24h = pair?.txns?.h24?.buys || 0
-    const sells24h = pair?.txns?.h24?.sells || 0
-    const priceChange24h = pair?.priceChange?.h24 || 0
-
-    const dexName = pair?.dexId || null
-    const pairCreatedAt = pair?.pairCreatedAt || null
-
-    const honeypot = bool(goplus?.is_honeypot)
-    const mintable = bool(goplus?.is_mintable)
-    const blacklist = bool(goplus?.is_blacklisted)
-    const transferPausable = bool(goplus?.transfer_pausable)
-    const proxyContract = bool(goplus?.is_proxy)
-    const selfDestruct = bool(goplus?.selfdestruct)
-    const hiddenOwner = bool(goplus?.hidden_owner)
-    const canTakeBackOwnership = bool(goplus?.can_take_back_ownership)
-    const slippageModifiable = bool(goplus?.slippage_modifiable)
-    const tradingCooldown = bool(goplus?.trading_cooldown)
-    const externalCall = bool(goplus?.external_call)
-    const cannotBuy = bool(goplus?.cannot_buy)
-    const cannotSellAll = bool(goplus?.cannot_sell_all)
-    const isOpenSource = bool(goplus?.is_open_source)
-    const ownerChangeBalance = bool(goplus?.owner_change_balance)
-    const isWhitelisted = bool(goplus?.is_in_dex)
-
-    const ownerAddress = goplus?.owner_address || null
-    const creatorAddress = goplus?.creator_address || null
-
-    const ownerRenounced = ownerAddress === "0x0000000000000000000000000000000000000000"
-
-    const holderCount = goplus?.holder_count ? Number(goplus.holder_count) : null
-
-    const buyTax = pct(goplus?.buy_tax)
-    const sellTax = pct(goplus?.sell_tax)
-
-    let topHolderPercent = null
-    let top5Percent = null
-    let top10Percent = null
-    let whaleRisk = null
-
-    if (moralis && moralis.length > 0) {
-
-      topHolderPercent = moralis[0]?.percentage || null
-
-      top5Percent = moralis.slice(0,5).reduce((sum,h)=>sum + (h.percentage || 0),0)
-      top10Percent = moralis.slice(0,10).reduce((sum,h)=>sum + (h.percentage || 0),0)
-
-      if (top10Percent > 60) whaleRisk = "High"
-      else if (top10Percent > 40) whaleRisk = "Moderate"
-      else whaleRisk = "Healthy"
-    }
+    // -------------------------
+    // RISK SCORING
+    // -------------------------
 
     let score = 0
 
-    if (honeypot) score += 40
-    if (mintable) score += 15
-    if (!ownerRenounced) score += 10
-    if (hiddenOwner) score += 20
-    if (selfDestruct) score += 20
-    if (blacklist) score += 10
-    if (transferPausable) score += 10
-    if (proxyContract) score += 8
-    if (canTakeBackOwnership) score += 15
-    if (sellTax > 10) score += 10
-    if (liquidityUSD < 10000) score += 15
-    if (topHolderPercent > 20) score += 10
-    if (top10Percent > 50) score += 8
+    if (securityData.honeypot) score += 40
+    if (securityData.mintable) score += 15
+    if (!securityData.ownerRenounced) score += 10
+    if (securityData.hiddenOwner) score += 20
+    if (securityData.selfDestruct) score += 20
+    if (securityData.blacklist) score += 10
+    if (securityData.transferPausable) score += 10
+    if (securityData.proxyContract) score += 8
+    if (securityData.canTakeBackOwnership) score += 15
+    if (securityData.sellTax > 10) score += 10
+    if (liquidity < 10000) score += 15
+    if (holderData.topHolderPercent > 20) score += 10
+    if (holderData.top10Percent > 50) score += 8
 
     const riskScore = Math.min(100, score)
 
     const riskLevel =
-      riskScore >= 70 ? "High"
-      : riskScore >= 40 ? "Moderate"
-      : "Low"
+      score >= 70 ? "High" :
+      score >= 40 ? "Moderate" :
+      "Low"
 
     const securityGrade =
-      riskScore >= 70 ? "F"
-      : riskScore >= 50 ? "D"
-      : riskScore >= 30 ? "C"
-      : riskScore >= 15 ? "B"
-      : "A"
+      score >= 70 ? "F" :
+      score >= 50 ? "D" :
+      score >= 30 ? "C" :
+      score >= 15 ? "B" :
+      "A"
 
-    const riskSignals = []
-
-    if (honeypot) riskSignals.push("Honeypot detected")
-    if (mintable) riskSignals.push("Token is mintable")
-    if (!ownerRenounced) riskSignals.push("Owner not renounced")
-    if (hiddenOwner) riskSignals.push("Hidden owner detected")
-    if (blacklist) riskSignals.push("Blacklist function present")
-    if (transferPausable) riskSignals.push("Transfers can be paused")
-    if (sellTax > 10) riskSignals.push("High sell tax")
+    // -------------------------
+    // RESPONSE
+    // -------------------------
 
     return res.status(200).json({
 
       tokenName,
       tokenSymbol,
       address: contractAddress,
+      chain,
 
-      price,
-      liquidityUSD,
+      price: priceUsd,
+      liquidityUSD: liquidity,
       marketCap,
       volume24h,
 
       buys24h,
       sells24h,
-      priceChange24h,
       dexName,
-      pairCreatedAt,
 
       riskScore,
       riskLevel,
       securityGrade,
-      riskSignals,
 
-      honeypot,
-      mintable,
-      blacklist,
-      ownerRenounced,
-      transferPausable,
-      proxyContract,
-      selfDestruct,
-      hiddenOwner,
-      canTakeBackOwnership,
-      slippageModifiable,
-      tradingCooldown,
-      externalCall,
-      cannotBuy,
-      cannotSellAll,
-      isOpenSource,
-      ownerChangeBalance,
-      isWhitelisted,
+      ...securityData,
 
-      buyTax,
-      sellTax,
-
-      ownerAddress,
-      creatorAddress,
-
-      holderCount,
-      contractAgeDays,
-
-      topHolderPercent,
-      top5Percent,
-      top10Percent,
-      whaleRisk
+      ...holderData
 
     })
 
@@ -262,5 +247,7 @@ export default async function handler(req, res) {
     return res.status(500).json({
       error: "Analyzer failed"
     })
+
   }
+
 }
