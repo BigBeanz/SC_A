@@ -3,6 +3,10 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
+// --------------------------------
+// SIMPLE IN-MEMORY CACHE
+// --------------------------------
+
 const CACHE_TTL_MS = 30 * 1000
 const RESPONSE_CACHE = new Map()
 
@@ -75,18 +79,23 @@ export default async function handler(req, res) {
     const moralisChain = chainMap[chain]?.moralis || null
     const goplusChain = chainMap[chain]?.goplus || null
 
-    const [dexResult, goplusResult, moralisResult, pulseMetaResult, pulseHolderResult] =
-      await Promise.all([
-        fetchDexScreener(contractAddress, chain),
-        fetchGoPlus(contractAddress, goplusChain),
-        fetchMoralisHolders(contractAddress, moralisChain),
-        chain === "pulsechain"
-          ? fetchPulsechainTokenMetadata(contractAddress)
-          : Promise.resolve(null),
-        chain === "pulsechain"
-          ? fetchPulsechainHolderDistribution(contractAddress)
-          : Promise.resolve(null),
-      ])
+    const [
+      dexResult,
+      goplusResult,
+      moralisResult,
+      pulseMetaResult,
+      pulseHolderResult
+    ] = await Promise.all([
+      fetchDexScreener(contractAddress, chain),
+      fetchGoPlus(contractAddress, goplusChain),
+      fetchMoralisHolders(contractAddress, moralisChain),
+      chain === "pulsechain"
+        ? fetchPulsechainTokenMetadata(contractAddress)
+        : Promise.resolve(null),
+      chain === "pulsechain"
+        ? fetchPulsechainHolderDistribution(contractAddress)
+        : Promise.resolve(null),
+    ])
 
     const pair = dexResult?.pair || null
 
@@ -147,12 +156,16 @@ export default async function handler(req, res) {
       liquidityUSD > 0 ? volume24h / liquidityUSD : null
 
     const sellPressure =
-      buys24h + sells24h > 0 ? sells24h / (buys24h + sells24h) : null
+      buys24h + sells24h > 0
+        ? sells24h / (buys24h + sells24h)
+        : null
 
     let score = 0
     const riskSignalSet = new Set()
 
+    // --------------------------------
     // CONTRACT RISKS
+    // --------------------------------
 
     if (securityData.honeypot === true) {
       score += 40
@@ -179,16 +192,24 @@ export default async function handler(req, res) {
       riskSignalSet.add("highSellTax")
     }
 
+    // --------------------------------
     // LIQUIDITY RISKS
+    // --------------------------------
 
     if (liquidityUSD < 10000) {
       score += 20
       riskSignalSet.add("lowLiquidity")
     }
 
-    if (liqRatio !== null && liqRatio < 0.02) {
-      score += 25
-      riskSignalSet.add("extremeLiquidityRisk")
+    if (liqRatio !== null) {
+      if (liqRatio < 0.02) {
+        score += 25
+        riskSignalSet.add("extremeLiquidityRisk")
+      }
+      else if (liqRatio < 0.05) {
+        score += 15
+        riskSignalSet.add("lowLiquiditySupport")
+      }
     }
 
     if (volRatio !== null && volRatio > 8) {
@@ -196,7 +217,9 @@ export default async function handler(req, res) {
       riskSignalSet.add("washTradingSuspected")
     }
 
+    // --------------------------------
     // WHALE RISKS
+    // --------------------------------
 
     if ((holderData.topHolderPercent ?? 0) > 20) {
       score += 10
@@ -208,7 +231,9 @@ export default async function handler(req, res) {
       riskSignalSet.add("extremeWhaleControl")
     }
 
-    // MARKET HEALTH LAYER
+    // --------------------------------
+    // MARKET HEALTH SCORING
+    // --------------------------------
 
     if (priceChange24h !== null) {
 
