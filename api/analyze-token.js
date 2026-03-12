@@ -16,17 +16,12 @@ export default async function handler(req, res) {
 
     const { address } = req.body
 
-    if (!address) {
+    if (!address)
       return res.status(400).json({ error: "Missing contract address" })
-    }
 
     const normalizedAddress = address.toLowerCase()
 
     const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
-
-    // --------------------------------------------------
-    // Fetch APIs
-    // --------------------------------------------------
 
     const [goplusRes, dexRes, creationRes] = await Promise.all([
 
@@ -51,10 +46,6 @@ export default async function handler(req, res) {
     const security = goplus?.result?.[normalizedAddress] || {}
     const pair = dex?.pairs?.[0] || {}
 
-    // --------------------------------------------------
-    // Token Metadata
-    // --------------------------------------------------
-
     const tokenName =
       pair?.baseToken?.name ||
       security.token_name ||
@@ -63,10 +54,6 @@ export default async function handler(req, res) {
     const tokenSymbol =
       pair?.baseToken?.symbol ||
       ""
-
-    // --------------------------------------------------
-    // Market Data
-    // --------------------------------------------------
 
     const liquidityUSD = Number(pair?.liquidity?.usd || 0)
     const marketCap = Number(pair?.fdv || 0)
@@ -77,10 +64,6 @@ export default async function handler(req, res) {
       pair?.pairCreatedAt
         ? new Date(pair.pairCreatedAt).toISOString()
         : null
-
-    // --------------------------------------------------
-    // Contract Age
-    // --------------------------------------------------
 
     let contractAgeDays = null
 
@@ -93,7 +76,6 @@ export default async function handler(req, res) {
       )
 
       const tx = await txRes.json()
-
       const blockNumber = tx?.result?.blockNumber
 
       if (blockNumber) {
@@ -103,15 +85,12 @@ export default async function handler(req, res) {
         )
 
         const block = await blockRes.json()
-
         const timestampHex = block?.result?.timestamp
 
         if (timestampHex) {
 
           const timestamp = parseInt(timestampHex, 16) * 1000
-
-          contractAgeDays =
-            (Date.now() - timestamp) / 86400000
+          contractAgeDays = (Date.now() - timestamp) / 86400000
 
         }
 
@@ -119,20 +98,11 @@ export default async function handler(req, res) {
 
     }
 
-    // --------------------------------------------------
-    // Tokenomics
-    // --------------------------------------------------
-
     const buyTax = Number(security.buy_tax || 0)
     const sellTax = Number(security.sell_tax || 0)
 
-    // --------------------------------------------------
-    // Security Flags
-    // --------------------------------------------------
-
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
-    const blacklist = security.is_blacklisted === "1"
     const proxyContract = security.is_proxy === "1"
     const transferPausable = security.transfer_pausable === "1"
 
@@ -143,17 +113,37 @@ export default async function handler(req, res) {
       "0x0000000000000000000000000000000000000000"
 
     // --------------------------------------------------
-    // Calculated Metrics
+    // Liquidity Lock Detection
     // --------------------------------------------------
 
-    let liquidityRatio = 0
-    let volumePressure = 0
+    let liquidityLocked = false
+    let liquidityLockType = "unknown"
+    let lpHolder = null
 
-    if (marketCap > 0)
-      liquidityRatio = liquidityUSD / marketCap
+    const burnAddress = "0x000000000000000000000000000000000000dead"
 
-    if (liquidityUSD > 0)
-      volumePressure = volume24h / liquidityUSD
+    if (pair?.pairAddress) {
+
+      const lpToken = pair.pairAddress
+
+      const holderRes = await fetch(
+        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${lpToken}&page=1&offset=5&apikey=${ETHERSCAN_API_KEY}`
+      )
+
+      const holders = await holderRes.json()
+
+      const topHolder = holders?.result?.[0]?.TokenHolderAddress
+
+      lpHolder = topHolder
+
+      if (topHolder?.toLowerCase() === burnAddress) {
+
+        liquidityLocked = true
+        liquidityLockType = "burned"
+
+      }
+
+    }
 
     // --------------------------------------------------
     // Risk Engine
@@ -169,44 +159,17 @@ export default async function handler(req, res) {
       riskSignals.push({
         key,
         title,
-        description,
-        severity:
-          points >= 40 ? "high" :
-          points >= 20 ? "medium" :
-          "low"
+        description
       })
-    }
-
-    // Contract Age
-
-    if (contractAgeDays !== null) {
-
-      if (contractAgeDays < 1)
-        addRisk(
-          "veryNewContract",
-          35,
-          "Very new contract",
-          "Token contract created less than 24 hours ago."
-        )
-
-      else if (contractAgeDays < 7)
-        addRisk(
-          "newContract",
-          20,
-          "New contract",
-          "Token contract created within the last week."
-        )
 
     }
-
-    // Honeypot logic (safer)
 
     if (honeypot && sellTax > 20)
       addRisk(
-        "honeypotHighConfidence",
+        "honeypot",
         80,
         "Possible honeypot",
-        "Security scanner detected honeypot behavior and high sell tax."
+        "Security scanner detected honeypot behavior."
       )
 
     else if (honeypot)
@@ -214,10 +177,8 @@ export default async function handler(req, res) {
         "honeypotWarning",
         25,
         "Honeypot warning",
-        "Security scanner flagged possible honeypot behavior. Manual verification recommended."
+        "Security API flagged possible honeypot behavior."
       )
-
-    // Contract risks
 
     if (mintable)
       addRisk(
@@ -235,58 +196,18 @@ export default async function handler(req, res) {
         "Developer retains control."
       )
 
-    if (proxyContract)
+    if (!liquidityLocked)
       addRisk(
-        "proxyContract",
-        8,
-        "Upgradeable contract",
-        "Contract logic can change."
-      )
-
-    // Liquidity risk
-
-    if (liquidityUSD < 25000)
-      addRisk(
-        "lowLiquidity",
+        "liquidityUnlocked",
         25,
-        "Low liquidity",
-        "Low liquidity increases price manipulation risk."
-      )
-
-    if (liquidityRatio < 0.01)
-      addRisk(
-        "extremeLiquidityRatio",
-        20,
-        "Extremely low liquidity ratio",
-        "Liquidity is extremely small relative to market cap."
-      )
-
-    // Volume pressure
-
-    if (volumePressure > 10)
-      addRisk(
-        "extremeVolumePressure",
-        15,
-        "Extreme trading pressure",
-        "Trading volume far exceeds liquidity."
-      )
-
-    if (sellTax > 20)
-      addRisk(
-        "extremeSellTax",
-        30,
-        "Extreme sell tax",
-        "Selling heavily penalized."
+        "Liquidity not locked",
+        "Developer may be able to remove liquidity."
       )
 
     if (riskScore > 100)
       riskScore = 100
 
-    // --------------------------------------------------
-    // Risk Level
-    // --------------------------------------------------
-
-    let riskLevel = "Very Safe"
+    let riskLevel = "Low Risk"
 
     if (riskScore >= 80)
       riskLevel = "Extreme Risk"
@@ -294,12 +215,6 @@ export default async function handler(req, res) {
       riskLevel = "High Risk"
     else if (riskScore >= 40)
       riskLevel = "Moderate Risk"
-    else if (riskScore >= 20)
-      riskLevel = "Low Risk"
-
-    // --------------------------------------------------
-    // Response
-    // --------------------------------------------------
 
     return res.status(200).json({
 
@@ -313,26 +228,25 @@ export default async function handler(req, res) {
       contractAgeDays,
       pairCreatedAt,
 
-      riskSignals,
+      liquidityLocked,
+      liquidityLockType,
+      lpHolder,
 
       honeypot,
       mintable,
-      blacklist,
       ownerRenounced,
-      transferPausable,
       proxyContract,
+      transferPausable,
 
       buyTax,
       sellTax,
 
       liquidityUSD,
       marketCap,
-      liquidityRatio,
-
       volume24h,
-      volumePressure,
-
       price,
+
+      riskSignals,
 
       scanTime: new Date().toISOString()
 
