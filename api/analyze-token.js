@@ -24,9 +24,9 @@ export default async function handler(req, res) {
 
     const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
 
-    // --------------------------------
+    // -----------------------------
     // Fetch APIs
-    // --------------------------------
+    // -----------------------------
 
     const [goplusRes, dexRes, creationRes] = await Promise.all([
 
@@ -51,9 +51,9 @@ export default async function handler(req, res) {
     const security = goplus?.result?.[normalizedAddress] || {}
     const pair = dex?.pairs?.[0] || {}
 
-    // --------------------------------
-    // Metadata
-    // --------------------------------
+    // -----------------------------
+    // Token Metadata
+    // -----------------------------
 
     const tokenName =
       pair?.baseToken?.name ||
@@ -64,25 +64,71 @@ export default async function handler(req, res) {
       pair?.baseToken?.symbol ||
       ""
 
-    // --------------------------------
+    // -----------------------------
     // Market Data
-    // --------------------------------
+    // -----------------------------
 
     const liquidityUSD = Number(pair?.liquidity?.usd || 0)
     const marketCap = Number(pair?.fdv || 0)
     const price = Number(pair?.priceUsd || 0)
     const volume24h = Number(pair?.volume?.h24 || 0)
 
-    // --------------------------------
+    const pairCreatedAt =
+      pair?.pairCreatedAt
+        ? new Date(pair.pairCreatedAt).toISOString()
+        : null
+
+    // -----------------------------
+    // Contract Age
+    // -----------------------------
+
+    let contractAgeDays = null
+
+    if (creation?.result?.length > 0) {
+
+      const txHash = creation.result[0].txHash
+
+      const txRes = await fetch(
+        `https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${ETHERSCAN_API_KEY}`
+      )
+
+      const tx = await txRes.json()
+
+      const blockNumber = tx?.result?.blockNumber
+
+      if (blockNumber) {
+
+        const blockRes = await fetch(
+          `https://api.etherscan.io/api?module=proxy&action=eth_getBlockByNumber&tag=${blockNumber}&boolean=true&apikey=${ETHERSCAN_API_KEY}`
+        )
+
+        const block = await blockRes.json()
+
+        const timestampHex = block?.result?.timestamp
+
+        if (timestampHex) {
+
+          const timestamp = parseInt(timestampHex, 16) * 1000
+
+          contractAgeDays =
+            (Date.now() - timestamp) / 86400000
+
+        }
+
+      }
+
+    }
+
+    // -----------------------------
     // Tokenomics
-    // --------------------------------
+    // -----------------------------
 
     const buyTax = Number(security.buy_tax || 0)
     const sellTax = Number(security.sell_tax || 0)
 
-    // --------------------------------
+    // -----------------------------
     // Security Flags
-    // --------------------------------
+    // -----------------------------
 
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
@@ -96,25 +142,9 @@ export default async function handler(req, res) {
       ownerAddress ===
       "0x0000000000000000000000000000000000000000"
 
-    // --------------------------------
-    // Contract Age
-    // --------------------------------
-
-    let contractAgeDays = null
-
-    if (creation?.result?.[0]?.timestamp) {
-
-      const creationTime = Number(creation.result[0].timestamp) * 1000
-      const now = Date.now()
-
-      contractAgeDays =
-        (now - creationTime) / (1000 * 60 * 60 * 24)
-
-    }
-
-    // --------------------------------
+    // -----------------------------
     // Calculated Metrics
-    // --------------------------------
+    // -----------------------------
 
     let liquidityRatio = 0
     let volumePressure = 0
@@ -125,9 +155,9 @@ export default async function handler(req, res) {
     if (liquidityUSD > 0)
       volumePressure = volume24h / liquidityUSD
 
-    // --------------------------------
+    // -----------------------------
     // Risk Engine
-    // --------------------------------
+    // -----------------------------
 
     let riskScore = 0
     const riskSignals = []
@@ -147,9 +177,7 @@ export default async function handler(req, res) {
       })
     }
 
-    // --------------------------------
     // Contract Age Risk
-    // --------------------------------
 
     if (contractAgeDays !== null) {
 
@@ -158,7 +186,7 @@ export default async function handler(req, res) {
           "veryNewContract",
           40,
           "Very new contract",
-          "Token contract was created less than 24 hours ago."
+          "Token contract created less than 24 hours ago."
         )
 
       else if (contractAgeDays < 7)
@@ -166,21 +194,19 @@ export default async function handler(req, res) {
           "newContract",
           20,
           "New contract",
-          "Token contract is less than 7 days old."
+          "Token contract created within the last week."
         )
 
     }
 
-    // --------------------------------
     // Contract Risks
-    // --------------------------------
 
     if (honeypot)
       addRisk(
         "honeypot",
         90,
         "Honeypot detected",
-        "Token may allow buying but block selling."
+        "Token may block selling."
       )
 
     if (mintable)
@@ -188,31 +214,7 @@ export default async function handler(req, res) {
         "mintable",
         20,
         "Mint function enabled",
-        "New tokens may be created."
-      )
-
-    if (blacklist)
-      addRisk(
-        "blacklist",
-        30,
-        "Blacklist capability",
-        "Wallets may be blocked."
-      )
-
-    if (transferPausable)
-      addRisk(
-        "transferPause",
-        20,
-        "Transfers can be paused",
-        "Trading could be frozen."
-      )
-
-    if (proxyContract)
-      addRisk(
-        "proxyContract",
-        10,
-        "Upgradeable contract",
-        "Logic may change."
+        "Supply can increase."
       )
 
     if (!ownerRenounced)
@@ -223,9 +225,15 @@ export default async function handler(req, res) {
         "Developer retains control."
       )
 
-    // --------------------------------
+    if (proxyContract)
+      addRisk(
+        "proxyContract",
+        10,
+        "Upgradeable contract",
+        "Logic can change."
+      )
+
     // Liquidity Risk
-    // --------------------------------
 
     if (liquidityUSD < 25000)
       addRisk(
@@ -240,40 +248,18 @@ export default async function handler(req, res) {
         "extremeLiquidityRatio",
         30,
         "Extremely low liquidity ratio",
-        "Liquidity relative to market cap is extremely low."
+        "Liquidity vs market cap extremely low."
       )
 
-    else if (liquidityRatio < 0.03)
-      addRisk(
-        "lowLiquidityRatio",
-        15,
-        "Low liquidity ratio",
-        "Liquidity relative to market cap is limited."
-      )
-
-    // --------------------------------
-    // Volume Manipulation
-    // --------------------------------
+    // Volume Pressure
 
     if (volumePressure > 10)
       addRisk(
         "extremeVolumePressure",
         20,
-        "Extreme volume pressure",
-        "Trading volume far exceeds liquidity."
+        "Extreme trading pressure",
+        "Volume far exceeds liquidity."
       )
-
-    else if (volumePressure > 5)
-      addRisk(
-        "highVolumePressure",
-        10,
-        "High trading pressure",
-        "Speculative trading detected."
-      )
-
-    // --------------------------------
-    // Tax Risk
-    // --------------------------------
 
     if (sellTax > 20)
       addRisk(
@@ -283,28 +269,10 @@ export default async function handler(req, res) {
         "Selling heavily penalized."
       )
 
-    else if (sellTax > 10)
-      addRisk(
-        "highSellTax",
-        20,
-        "High sell tax",
-        "Selling expensive."
-      )
-
-    if (buyTax > 10)
-      addRisk(
-        "highBuyTax",
-        10,
-        "High buy tax",
-        "Buying incurs additional cost."
-      )
-
     if (riskScore > 100)
       riskScore = 100
 
-    // --------------------------------
     // Risk Level
-    // --------------------------------
 
     let riskLevel = "Very Safe"
 
@@ -317,9 +285,9 @@ export default async function handler(req, res) {
     else if (riskScore >= 20)
       riskLevel = "Low Risk"
 
-    // --------------------------------
+    // -----------------------------
     // Response
-    // --------------------------------
+    // -----------------------------
 
     return res.status(200).json({
 
@@ -331,6 +299,7 @@ export default async function handler(req, res) {
       riskLevel,
 
       contractAgeDays,
+      pairCreatedAt,
 
       riskSignals,
 
