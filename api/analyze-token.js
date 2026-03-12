@@ -24,9 +24,9 @@ export default async function handler(req, res) {
 
     const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
 
-    // -----------------------------
+    // --------------------------------------------------
     // Fetch APIs
-    // -----------------------------
+    // --------------------------------------------------
 
     const [goplusRes, dexRes, creationRes] = await Promise.all([
 
@@ -51,9 +51,9 @@ export default async function handler(req, res) {
     const security = goplus?.result?.[normalizedAddress] || {}
     const pair = dex?.pairs?.[0] || {}
 
-    // -----------------------------
+    // --------------------------------------------------
     // Token Metadata
-    // -----------------------------
+    // --------------------------------------------------
 
     const tokenName =
       pair?.baseToken?.name ||
@@ -64,9 +64,9 @@ export default async function handler(req, res) {
       pair?.baseToken?.symbol ||
       ""
 
-    // -----------------------------
+    // --------------------------------------------------
     // Market Data
-    // -----------------------------
+    // --------------------------------------------------
 
     const liquidityUSD = Number(pair?.liquidity?.usd || 0)
     const marketCap = Number(pair?.fdv || 0)
@@ -78,9 +78,9 @@ export default async function handler(req, res) {
         ? new Date(pair.pairCreatedAt).toISOString()
         : null
 
-    // -----------------------------
+    // --------------------------------------------------
     // Contract Age
-    // -----------------------------
+    // --------------------------------------------------
 
     let contractAgeDays = null
 
@@ -119,16 +119,16 @@ export default async function handler(req, res) {
 
     }
 
-    // -----------------------------
+    // --------------------------------------------------
     // Tokenomics
-    // -----------------------------
+    // --------------------------------------------------
 
     const buyTax = Number(security.buy_tax || 0)
     const sellTax = Number(security.sell_tax || 0)
 
-    // -----------------------------
+    // --------------------------------------------------
     // Security Flags
-    // -----------------------------
+    // --------------------------------------------------
 
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
@@ -142,9 +142,9 @@ export default async function handler(req, res) {
       ownerAddress ===
       "0x0000000000000000000000000000000000000000"
 
-    // -----------------------------
+    // --------------------------------------------------
     // Calculated Metrics
-    // -----------------------------
+    // --------------------------------------------------
 
     let liquidityRatio = 0
     let volumePressure = 0
@@ -155,9 +155,9 @@ export default async function handler(req, res) {
     if (liquidityUSD > 0)
       volumePressure = volume24h / liquidityUSD
 
-    // -----------------------------
+    // --------------------------------------------------
     // Risk Engine
-    // -----------------------------
+    // --------------------------------------------------
 
     let riskScore = 0
     const riskSignals = []
@@ -171,20 +171,20 @@ export default async function handler(req, res) {
         title,
         description,
         severity:
-          points >= 30 ? "high" :
-          points >= 15 ? "medium" :
+          points >= 40 ? "high" :
+          points >= 20 ? "medium" :
           "low"
       })
     }
 
-    // Contract Age Risk
+    // Contract Age
 
     if (contractAgeDays !== null) {
 
       if (contractAgeDays < 1)
         addRisk(
           "veryNewContract",
-          40,
+          35,
           "Very new contract",
           "Token contract created less than 24 hours ago."
         )
@@ -199,28 +199,38 @@ export default async function handler(req, res) {
 
     }
 
-    // Contract Risks
+    // Honeypot logic (safer)
 
-    if (honeypot)
+    if (honeypot && sellTax > 20)
       addRisk(
-        "honeypot",
-        90,
-        "Honeypot detected",
-        "Token may block selling."
+        "honeypotHighConfidence",
+        80,
+        "Possible honeypot",
+        "Security scanner detected honeypot behavior and high sell tax."
       )
+
+    else if (honeypot)
+      addRisk(
+        "honeypotWarning",
+        25,
+        "Honeypot warning",
+        "Security scanner flagged possible honeypot behavior. Manual verification recommended."
+      )
+
+    // Contract risks
 
     if (mintable)
       addRisk(
         "mintable",
-        20,
+        15,
         "Mint function enabled",
-        "Supply can increase."
+        "New tokens can be created."
       )
 
     if (!ownerRenounced)
       addRisk(
         "ownerActive",
-        15,
+        10,
         "Owner still active",
         "Developer retains control."
       )
@@ -228,43 +238,43 @@ export default async function handler(req, res) {
     if (proxyContract)
       addRisk(
         "proxyContract",
-        10,
+        8,
         "Upgradeable contract",
-        "Logic can change."
+        "Contract logic can change."
       )
 
-    // Liquidity Risk
+    // Liquidity risk
 
     if (liquidityUSD < 25000)
       addRisk(
         "lowLiquidity",
-        30,
+        25,
         "Low liquidity",
-        "Price manipulation possible."
+        "Low liquidity increases price manipulation risk."
       )
 
     if (liquidityRatio < 0.01)
       addRisk(
         "extremeLiquidityRatio",
-        30,
+        20,
         "Extremely low liquidity ratio",
-        "Liquidity vs market cap extremely low."
+        "Liquidity is extremely small relative to market cap."
       )
 
-    // Volume Pressure
+    // Volume pressure
 
     if (volumePressure > 10)
       addRisk(
         "extremeVolumePressure",
-        20,
+        15,
         "Extreme trading pressure",
-        "Volume far exceeds liquidity."
+        "Trading volume far exceeds liquidity."
       )
 
     if (sellTax > 20)
       addRisk(
         "extremeSellTax",
-        40,
+        30,
         "Extreme sell tax",
         "Selling heavily penalized."
       )
@@ -272,7 +282,9 @@ export default async function handler(req, res) {
     if (riskScore > 100)
       riskScore = 100
 
+    // --------------------------------------------------
     // Risk Level
+    // --------------------------------------------------
 
     let riskLevel = "Very Safe"
 
@@ -285,9 +297,9 @@ export default async function handler(req, res) {
     else if (riskScore >= 20)
       riskLevel = "Low Risk"
 
-    // -----------------------------
+    // --------------------------------------------------
     // Response
-    // -----------------------------
+    // --------------------------------------------------
 
     return res.status(200).json({
 
