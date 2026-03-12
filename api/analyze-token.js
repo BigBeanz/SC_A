@@ -1,8 +1,8 @@
 export default async function handler(req, res) {
 
-  // -------------------------
+  // -----------------------------
   // CORS
-  // -------------------------
+  // -----------------------------
 
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -27,9 +27,9 @@ export default async function handler(req, res) {
     const token = address.toLowerCase()
     const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY
 
-    // -------------------------
-    // FETCH APIs
-    // -------------------------
+    // --------------------------------------------------
+    // Fetch APIs
+    // --------------------------------------------------
 
     const [goplusRes, dexRes, creationRes] = await Promise.all([
 
@@ -54,9 +54,9 @@ export default async function handler(req, res) {
     const security = goplus?.result?.[token] || {}
     const pair = dex?.pairs?.[0] || {}
 
-    // -------------------------
-    // TOKEN METADATA
-    // -------------------------
+    // --------------------------------------------------
+    // Token Metadata
+    // --------------------------------------------------
 
     const tokenName =
       pair?.baseToken?.name ||
@@ -67,25 +67,25 @@ export default async function handler(req, res) {
       pair?.baseToken?.symbol ||
       ""
 
-    // -------------------------
-    // MARKET DATA
-    // -------------------------
+    // --------------------------------------------------
+    // Market Data
+    // --------------------------------------------------
 
     const liquidityUSD = Number(pair?.liquidity?.usd || 0)
     const marketCap = Number(pair?.fdv || 0)
     const volume24h = Number(pair?.volume?.h24 || 0)
     const price = Number(pair?.priceUsd || 0)
 
-    // -------------------------
-    // TOKENOMICS
-    // -------------------------
+    // --------------------------------------------------
+    // Tokenomics
+    // --------------------------------------------------
 
     const buyTax = Number(security.buy_tax || 0)
     const sellTax = Number(security.sell_tax || 0)
 
-    // -------------------------
-    // SECURITY FLAGS
-    // -------------------------
+    // --------------------------------------------------
+    // Security Flags
+    // --------------------------------------------------
 
     const honeypot = security.is_honeypot === "1"
     const mintable = security.is_mintable === "1"
@@ -95,9 +95,9 @@ export default async function handler(req, res) {
       security.owner_address ===
       "0x0000000000000000000000000000000000000000"
 
-    // -------------------------
-    // CONTRACT AGE
-    // -------------------------
+    // --------------------------------------------------
+    // Contract Age
+    // --------------------------------------------------
 
     let contractAgeDays = null
 
@@ -110,7 +110,6 @@ export default async function handler(req, res) {
       )
 
       const tx = await txRes.json()
-
       const blockNumber = tx?.result?.blockNumber
 
       if (blockNumber) {
@@ -120,7 +119,6 @@ export default async function handler(req, res) {
         )
 
         const block = await blockRes.json()
-
         const timestampHex = block?.result?.timestamp
 
         if (timestampHex) {
@@ -137,9 +135,86 @@ export default async function handler(req, res) {
 
     }
 
-    // -------------------------
-    // MARKET METRICS
-    // -------------------------
+    // --------------------------------------------------
+    // Whale Distribution Detection
+    // --------------------------------------------------
+
+    let topHolderPercent = null
+    let top5Percent = null
+    let top10Percent = null
+    let whaleRisk = "Unknown"
+
+    try {
+
+      const holdersRes = await fetch(
+        `https://api.etherscan.io/api?module=token&action=tokenholderlist&contractaddress=${token}&page=1&offset=10&apikey=${ETHERSCAN_API_KEY}`
+      )
+
+      const holders = await holdersRes.json()
+
+      if (Array.isArray(holders?.result)) {
+
+        const total = holders.result.reduce(
+          (sum, h) => sum + Number(h.TokenHolderQuantity || 0),
+          0
+        )
+
+        if (total > 0) {
+
+          let top5 = 0
+          let top10 = 0
+
+          holders.result.forEach((h, i) => {
+
+            const pct =
+              Number(h.TokenHolderQuantity || 0) /
+              total * 100
+
+            if (i === 0)
+              topHolderPercent = pct
+
+            if (i < 5)
+              top5 += pct
+
+            if (i < 10)
+              top10 += pct
+
+          })
+
+          top5Percent = top5
+          top10Percent = top10
+
+        }
+
+      }
+
+    } catch (e) {
+
+      console.log("Holder distribution unavailable")
+
+    }
+
+    // Whale Risk Logic
+
+    if (topHolderPercent !== null) {
+
+      if (topHolderPercent > 25)
+        whaleRisk = "High"
+
+      else if (top10Percent > 60)
+        whaleRisk = "High"
+
+      else if (topHolderPercent < 10)
+        whaleRisk = "Healthy"
+
+      else
+        whaleRisk = "Moderate"
+
+    }
+
+    // --------------------------------------------------
+    // Market Metrics
+    // --------------------------------------------------
 
     const liquidityRatio =
       marketCap > 0 ? liquidityUSD / marketCap : 0
@@ -147,9 +222,9 @@ export default async function handler(req, res) {
     const volumePressure =
       liquidityUSD > 0 ? volume24h / liquidityUSD : 0
 
-    // -------------------------
-    // RISK ENGINE
-    // -------------------------
+    // --------------------------------------------------
+    // Risk Engine
+    // --------------------------------------------------
 
     let riskScore = 0
     const riskSignals = []
@@ -166,25 +241,13 @@ export default async function handler(req, res) {
 
     }
 
-    // Honeypot detection
-
-    if (honeypot && sellTax > 20)
+    if (honeypot)
       addRisk(
         "honeypot",
         80,
         "Possible honeypot",
         "Security scanner detected honeypot behavior."
       )
-
-    else if (honeypot)
-      addRisk(
-        "honeypotWarning",
-        25,
-        "Honeypot warning",
-        "Security API flagged possible honeypot behavior."
-      )
-
-    // Contract risks
 
     if (mintable)
       addRisk(
@@ -207,10 +270,8 @@ export default async function handler(req, res) {
         "proxy",
         8,
         "Upgradeable contract",
-        "Contract logic can change."
+        "Logic can change."
       )
-
-    // Liquidity risks
 
     if (liquidityUSD < 25000)
       addRisk(
@@ -220,26 +281,6 @@ export default async function handler(req, res) {
         "Price easily manipulated."
       )
 
-    if (liquidityRatio < 0.01)
-      addRisk(
-        "liqRatio",
-        20,
-        "Liquidity ratio low",
-        "Liquidity small vs market cap."
-      )
-
-    // Market manipulation
-
-    if (volumePressure > 10)
-      addRisk(
-        "volume",
-        15,
-        "Extreme trading pressure",
-        "Pump/dump risk."
-      )
-
-    // Contract age risk
-
     if (contractAgeDays !== null && contractAgeDays < 7)
       addRisk(
         "newContract",
@@ -248,7 +289,13 @@ export default async function handler(req, res) {
         "Recently deployed token."
       )
 
-    // Tax traps
+    if (topHolderPercent !== null && topHolderPercent > 25)
+      addRisk(
+        "whale",
+        25,
+        "Large whale holder",
+        "Top wallet holds a large percentage of supply."
+      )
 
     if (sellTax > 20)
       addRisk(
@@ -260,9 +307,9 @@ export default async function handler(req, res) {
 
     if (riskScore > 100) riskScore = 100
 
-    // -------------------------
-    // RISK LEVEL
-    // -------------------------
+    // --------------------------------------------------
+    // Risk Level
+    // --------------------------------------------------
 
     let riskLevel = "Low Risk"
 
@@ -273,9 +320,9 @@ export default async function handler(req, res) {
     else if (riskScore >= 40)
       riskLevel = "Moderate Risk"
 
-    // -------------------------
-    // RESPONSE
-    // -------------------------
+    // --------------------------------------------------
+    // Response
+    // --------------------------------------------------
 
     return res.status(200).json({
 
@@ -303,6 +350,11 @@ export default async function handler(req, res) {
 
       liquidityRatio,
       volumePressure,
+
+      topHolderPercent,
+      top5Percent,
+      top10Percent,
+      whaleRisk,
 
       riskSignals,
 
