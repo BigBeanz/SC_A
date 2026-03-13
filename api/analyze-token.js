@@ -3,10 +3,6 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
-// --------------------------------
-// SIMPLE IN-MEMORY CACHE
-// --------------------------------
-
 const CACHE_TTL_MS = 30 * 1000
 const RESPONSE_CACHE = new Map()
 
@@ -41,6 +37,180 @@ const DEFAULT_HOLDER_DATA = {
   top10Percent: null,
   whaleRisk: null,
 }
+
+/* -------------------------------------------------------------------------- */
+/*                                HELPERS                                     */
+/* -------------------------------------------------------------------------- */
+
+async function fetchDexScreener(contractAddress, chain) {
+  try {
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`
+    const res = await fetch(url)
+    const json = await res.json()
+
+    const pairs = json?.pairs || []
+
+    const chainPairs = pairs.filter((p) => p.chainId === chain)
+
+    const scoredPairs = (chainPairs.length ? chainPairs : pairs).map((p) => {
+      const liquidity = safeNumber(p?.liquidity?.usd)
+      const volume = safeNumber(p?.volume?.h24)
+
+      return {
+        pair: p,
+        score: liquidity * 0.6 + volume * 0.4,
+      }
+    })
+
+    const selected =
+      scoredPairs.sort((a, b) => b.score - a.score)[0]?.pair || null
+
+    return { pair: selected }
+  } catch (e) {
+    console.error("DexScreener error", e)
+    return { pair: null }
+  }
+}
+
+async function fetchGoPlus(contractAddress, goplusChain) {
+  if (!goplusChain) return null
+
+  try {
+    const url = `https://api.gopluslabs.io/api/v1/token_security/${goplusChain}?contract_addresses=${contractAddress}`
+    const res = await fetch(url)
+    const json = await res.json()
+
+    const tokenSecurity =
+      json?.result?.[contractAddress.toLowerCase()] || {}
+
+    const bool = (v) => (v === "1" ? true : v === "0" ? false : null)
+    const pct = (v) =>
+      v !== undefined && v !== null && v !== "" ? parseFloat(v) : null
+
+    const ownerAddress = tokenSecurity.owner_address || null
+
+    return {
+      honeypot: bool(tokenSecurity.is_honeypot),
+      mintable: bool(tokenSecurity.is_mintable),
+      blacklist: bool(tokenSecurity.is_blacklisted),
+      ownerRenounced:
+        ownerAddress === ZERO_ADDRESS
+          ? true
+          : ownerAddress
+          ? false
+          : null,
+      transferPausable: bool(tokenSecurity.transfer_pausable),
+      proxyContract: bool(tokenSecurity.is_proxy),
+      selfDestruct: bool(tokenSecurity.selfdestruct),
+      hiddenOwner: bool(tokenSecurity.hidden_owner),
+      canTakeBackOwnership: bool(tokenSecurity.can_take_back_ownership),
+      slippageModifiable: bool(tokenSecurity.slippage_modifiable),
+      tradingCooldown: bool(tokenSecurity.trading_cooldown),
+      externalCall: bool(tokenSecurity.external_call),
+      cannotBuy: bool(tokenSecurity.cannot_buy),
+      cannotSellAll: bool(tokenSecurity.cannot_sell_all),
+      buyTax: pct(tokenSecurity.buy_tax),
+      sellTax: pct(tokenSecurity.sell_tax),
+      ownerAddress,
+      creatorAddress: tokenSecurity.creator_address || null,
+      holderCount: tokenSecurity.holder_count
+        ? parseInt(tokenSecurity.holder_count, 10)
+        : null,
+      isOpenSource: bool(tokenSecurity.is_open_source),
+      ownerChangeBalance: bool(tokenSecurity.owner_change_balance),
+      isWhitelisted: bool(tokenSecurity.is_in_dex),
+    }
+  } catch (e) {
+    console.error("GoPlus error", e)
+    return null
+  }
+}
+
+async function fetchMoralisHolders(contractAddress, moralisChain) {
+  if (!moralisChain || !process.env.MORALIS_API_KEY) return null
+
+  try {
+    const url = `https://deep-index.moralis.io/api/v2.2/erc20/${contractAddress}/owners?chain=${moralisChain}&limit=10`
+
+    const res = await fetch(url, {
+      headers: { "X-API-Key": process.env.MORALIS_API_KEY },
+    })
+
+    const json = await res.json()
+    const holders = json?.result || []
+
+    if (!holders.length) return null
+
+    const topHolderPercent = holders[0]?.percentage || null
+
+    const top5Percent = holders
+      .slice(0, 5)
+      .reduce((sum, h) => sum + (h.percentage || 0), 0)
+
+    const top10Percent = holders
+      .slice(0, 10)
+      .reduce((sum, h) => sum + (h.percentage || 0), 0)
+
+    let whaleRisk = "Healthy"
+
+    if (top10Percent > 60) whaleRisk = "High"
+    else if (top10Percent > 40) whaleRisk = "Moderate"
+
+    return {
+      topHolderPercent,
+      top5Percent,
+      top10Percent,
+      whaleRisk,
+    }
+  } catch (e) {
+    console.error("Moralis error", e)
+    return null
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*                          CACHE / UTILITY HELPERS                           */
+/* -------------------------------------------------------------------------- */
+
+function getCache(key) {
+  const entry = RESPONSE_CACHE.get(key)
+
+  if (!entry) return null
+
+  if (Date.now() > entry.expiresAt) {
+    RESPONSE_CACHE.delete(key)
+    return null
+  }
+
+  return entry.data
+}
+
+function setCache(key, data) {
+  RESPONSE_CACHE.set(key, {
+    data,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  })
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function safeNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function safeInt(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback
+  const n = parseInt(value, 10)
+  return Number.isFinite(n) ? n : fallback
+}
+
+/* -------------------------------------------------------------------------- */
+/*                               MAIN HANDLER                                 */
+/* -------------------------------------------------------------------------- */
 
 export default async function handler(req, res) {
 
@@ -79,17 +249,11 @@ export default async function handler(req, res) {
     const moralisChain = chainMap[chain]?.moralis || null
     const goplusChain = chainMap[chain]?.goplus || null
 
-    const [dexResult, goplusResult, moralisResult, pulseMetaResult, pulseHolderResult] =
+    const [dexResult, goplusResult, moralisResult] =
       await Promise.all([
         fetchDexScreener(contractAddress, chain),
         fetchGoPlus(contractAddress, goplusChain),
         fetchMoralisHolders(contractAddress, moralisChain),
-        chain === "pulsechain"
-          ? fetchPulsechainTokenMetadata(contractAddress)
-          : Promise.resolve(null),
-        chain === "pulsechain"
-          ? fetchPulsechainHolderDistribution(contractAddress)
-          : Promise.resolve(null),
       ])
 
     const pair = dexResult?.pair || null
@@ -98,234 +262,16 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "No liquidity pair found" })
     }
 
-    const tokenName =
-      pair?.baseToken?.name ||
-      pulseMetaResult?.name ||
-      "Unknown Token"
-
-    const tokenSymbol =
-      pair?.baseToken?.symbol ||
-      pulseMetaResult?.symbol ||
-      "UNKNOWN"
-
     const price = safeNumber(pair?.priceUsd)
     const liquidityUSD = safeNumber(pair?.liquidity?.usd)
     const marketCap = safeNumber(pair?.fdv)
-    const volume24h = safeNumber(pair?.volume?.h24)
-
-    const buys24h = safeInt(pair?.txns?.h24?.buys)
-    const sells24h = safeInt(pair?.txns?.h24?.sells)
-
-    const dexName = pair?.dexId || "unknown"
-
-    const pairCreatedAt = pair?.pairCreatedAt
-      ? new Date(pair.pairCreatedAt).toISOString()
-      : null
-
-    const priceChange24h =
-      pair?.priceChange?.h24 !== undefined && pair?.priceChange?.h24 !== null
-        ? Number(pair.priceChange.h24)
-        : null
-
-    const fdv = safeNumber(pair?.fdv)
-    const scanTime = new Date().toISOString()
-
-    const securityData = {
-      ...DEFAULT_SECURITY_DATA,
-      ...(goplusResult || {}),
-    }
-
-    const holderData = {
-      ...DEFAULT_HOLDER_DATA,
-      ...(moralisResult || pulseHolderResult || {}),
-    }
-
-    if (securityData.holderCount == null && pulseHolderResult?.holderCount != null) {
-      securityData.holderCount = pulseHolderResult.holderCount
-    }
-
-    const liqRatio =
-      marketCap > 0 ? liquidityUSD / marketCap : null
-
-    const volRatio =
-      liquidityUSD > 0 ? volume24h / liquidityUSD : null
-
-    const sellPressure =
-      buys24h + sells24h > 0
-        ? sells24h / (buys24h + sells24h)
-        : null
-
-    let score = 0
-    const riskSignalSet = new Set()
-
-    if (securityData.honeypot === true) {
-      score += 40
-      riskSignalSet.add("honeypot")
-    }
-
-    if (securityData.cannotSellAll === true) {
-      score += 40
-      riskSignalSet.add("cannotSellAll")
-    }
-
-    if (securityData.mintable === true) {
-      score += 15
-      riskSignalSet.add("mintable")
-    }
-
-    if (securityData.ownerRenounced === false) {
-      score += 10
-      riskSignalSet.add("ownerRenounced")
-    }
-
-    if ((securityData.sellTax ?? 0) > 10) {
-      score += 10
-      riskSignalSet.add("highSellTax")
-    }
-
-    if (liquidityUSD < 10000) {
-      score += 20
-      riskSignalSet.add("lowLiquidity")
-    }
-
-    if (liqRatio !== null && liqRatio < 0.02) {
-      score += 25
-      riskSignalSet.add("extremeLiquidityRisk")
-    }
-
-    if (volRatio !== null && volRatio > 8) {
-      score += 15
-      riskSignalSet.add("washTradingSuspected")
-    }
-
-    if ((holderData.topHolderPercent ?? 0) > 20) {
-      score += 10
-      riskSignalSet.add("highTopHolderConcentration")
-    }
-
-    if ((holderData.top10Percent ?? 0) > 60) {
-      score += 30
-      riskSignalSet.add("extremeWhaleControl")
-    }
-
-    if (priceChange24h !== null) {
-
-      const drop = Math.abs(Math.min(0, Number(priceChange24h)))
-
-      if (drop >= 50) {
-        score += 30
-        riskSignalSet.add("severeDropDetected")
-      }
-      else if (drop >= 25) {
-        score += 18
-        riskSignalSet.add("significantDropDetected")
-      }
-      else if (drop >= 15) {
-        score += 8
-        riskSignalSet.add("priceDropDetected")
-      }
-
-    }
-
-    const contractAgeDays = pairCreatedAt
-      ? (Date.now() - new Date(pairCreatedAt).getTime()) / 86400000
-      : null
-
-    if (contractAgeDays !== null) {
-
-      if (contractAgeDays < 1) {
-        score += 30
-        riskSignalSet.add("veryNewToken")
-      }
-      else if (contractAgeDays < 7) {
-        score += 20
-        riskSignalSet.add("newToken")
-      }
-      else if (contractAgeDays < 30) {
-        score += 8
-        riskSignalSet.add("recentToken")
-      }
-
-    }
-
-    if (contractAgeDays !== null && contractAgeDays < 7 && liquidityUSD < 50000) {
-      score += 20
-      riskSignalSet.add("newTokenLowLiquidity")
-    }
-
-    if (sellPressure !== null) {
-
-      if (sellPressure > 0.75) {
-        score += 20
-        riskSignalSet.add("heavySellPressure")
-      }
-      else if (sellPressure > 0.65) {
-        score += 10
-        riskSignalSet.add("elevatedSellPressure")
-      }
-
-    }
-
-    const marketActivityRatio =
-      marketCap > 0 ? volume24h / marketCap : null
-
-    if (marketActivityRatio !== null && marketActivityRatio < 0.001 && marketCap > 10000) {
-      score += 12
-      riskSignalSet.add("lowMarketActivity")
-    }
-
-    if (volume24h < 500 && marketCap > 5000) {
-      score += 15
-      riskSignalSet.add("inactiveToken")
-    }
-
-    const riskScore = clamp(Math.round(score), 0, 100)
-
-    const riskLevel =
-      riskScore >= 60 ? "High" :
-      riskScore >= 30 ? "Moderate" :
-      "Low"
-
-    const securityGrade =
-      riskScore >= 60 ? "F" :
-      riskScore >= 45 ? "D" :
-      riskScore >= 30 ? "C" :
-      riskScore >= 15 ? "B" :
-      "A"
-
-    const riskSignals = Array.from(riskSignalSet)
 
     const responsePayload = {
-
-      tokenName,
-      tokenSymbol,
-      address: contractAddress,
-      chain,
-
       price,
       liquidityUSD,
       marketCap,
-      volume24h,
-      buys24h,
-      sells24h,
-      priceChange24h,
-      dexName,
-      pairCreatedAt,
-      fdv,
-      scanTime,
-
-      riskScore,
-      riskLevel,
-      securityGrade,
-      riskSignals,
-
-      contractAgeDays,
-      sellPressure,
-      liqRatio,
-      volRatio,
-
-      ...securityData,
-      ...holderData,
+      ...goplusResult,
+      ...moralisResult,
     }
 
     setCache(cacheKey, responsePayload)
@@ -340,50 +286,4 @@ export default async function handler(req, res) {
       error: "Analyzer failed",
     })
   }
-}
-
-// --------------------------------
-// CACHE HELPERS
-// --------------------------------
-
-function getCache(key) {
-
-  const entry = RESPONSE_CACHE.get(key)
-
-  if (!entry) return null
-
-  if (Date.now() > entry.expiresAt) {
-    RESPONSE_CACHE.delete(key)
-    return null
-  }
-
-  return entry.data
-}
-
-function setCache(key, data) {
-
-  RESPONSE_CACHE.set(key, {
-    data,
-    expiresAt: Date.now() + CACHE_TTL_MS,
-  })
-}
-
-// --------------------------------
-// UTILITY HELPERS
-// --------------------------------
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value))
-}
-
-function safeNumber(value, fallback = 0) {
-  if (value === null || value === undefined || value === "") return fallback
-  const n = Number(value)
-  return Number.isFinite(n) ? n : fallback
-}
-
-function safeInt(value, fallback = 0) {
-  if (value === null || value === undefined || value === "") return fallback
-  const n = parseInt(value, 10)
-  return Number.isFinite(n) ? n : fallback
 }
