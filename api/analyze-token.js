@@ -38,9 +38,53 @@ const DEFAULT_HOLDER_DATA = {
   whaleRisk: null,
 }
 
-/* -------------------------------------------------------------------------- */
-/*                                HELPERS                                     */
-/* -------------------------------------------------------------------------- */
+/* -------------------------------------------------- */
+/* CACHE HELPERS                                      */
+/* -------------------------------------------------- */
+
+function getCache(key) {
+  const entry = RESPONSE_CACHE.get(key)
+
+  if (!entry) return null
+
+  if (Date.now() > entry.expiresAt) {
+    RESPONSE_CACHE.delete(key)
+    return null
+  }
+
+  return entry.data
+}
+
+function setCache(key, data) {
+  RESPONSE_CACHE.set(key, {
+    data,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  })
+}
+
+/* -------------------------------------------------- */
+/* UTILITIES                                          */
+/* -------------------------------------------------- */
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value))
+}
+
+function safeNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function safeInt(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback
+  const n = parseInt(value, 10)
+  return Number.isFinite(n) ? n : fallback
+}
+
+/* -------------------------------------------------- */
+/* DexScreener                                        */
+/* -------------------------------------------------- */
 
 async function fetchDexScreener(contractAddress, chain) {
   try {
@@ -72,11 +116,17 @@ async function fetchDexScreener(contractAddress, chain) {
   }
 }
 
+/* -------------------------------------------------- */
+/* GoPlus Security                                    */
+/* -------------------------------------------------- */
+
 async function fetchGoPlus(contractAddress, goplusChain) {
   if (!goplusChain) return null
 
   try {
-    const url = `https://api.gopluslabs.io/api/v1/token_security/${goplusChain}?contract_addresses=${contractAddress}`
+    const url =
+      `https://api.gopluslabs.io/api/v1/token_security/${goplusChain}?contract_addresses=${contractAddress}`
+
     const res = await fetch(url)
     const json = await res.json()
 
@@ -113,9 +163,12 @@ async function fetchGoPlus(contractAddress, goplusChain) {
       sellTax: pct(tokenSecurity.sell_tax),
       ownerAddress,
       creatorAddress: tokenSecurity.creator_address || null,
-      holderCount: tokenSecurity.holder_count
-        ? parseInt(tokenSecurity.holder_count, 10)
-        : null,
+      holderCount:
+        tokenSecurity.holder_count !== undefined &&
+        tokenSecurity.holder_count !== null &&
+        tokenSecurity.holder_count !== ""
+          ? parseInt(tokenSecurity.holder_count, 10)
+          : null,
       isOpenSource: bool(tokenSecurity.is_open_source),
       ownerChangeBalance: bool(tokenSecurity.owner_change_balance),
       isWhitelisted: bool(tokenSecurity.is_in_dex),
@@ -126,14 +179,21 @@ async function fetchGoPlus(contractAddress, goplusChain) {
   }
 }
 
+/* -------------------------------------------------- */
+/* Moralis Holders                                    */
+/* -------------------------------------------------- */
+
 async function fetchMoralisHolders(contractAddress, moralisChain) {
   if (!moralisChain || !process.env.MORALIS_API_KEY) return null
 
   try {
-    const url = `https://deep-index.moralis.io/api/v2.2/erc20/${contractAddress}/owners?chain=${moralisChain}&limit=10`
+    const url =
+      `https://deep-index.moralis.io/api/v2.2/erc20/${contractAddress}/owners?chain=${moralisChain}&limit=10`
 
     const res = await fetch(url, {
-      headers: { "X-API-Key": process.env.MORALIS_API_KEY },
+      headers: {
+        "X-API-Key": process.env.MORALIS_API_KEY,
+      },
     })
 
     const json = await res.json()
@@ -168,49 +228,9 @@ async function fetchMoralisHolders(contractAddress, moralisChain) {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/*                          CACHE / UTILITY HELPERS                           */
-/* -------------------------------------------------------------------------- */
-
-function getCache(key) {
-  const entry = RESPONSE_CACHE.get(key)
-
-  if (!entry) return null
-
-  if (Date.now() > entry.expiresAt) {
-    RESPONSE_CACHE.delete(key)
-    return null
-  }
-
-  return entry.data
-}
-
-function setCache(key, data) {
-  RESPONSE_CACHE.set(key, {
-    data,
-    expiresAt: Date.now() + CACHE_TTL_MS,
-  })
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value))
-}
-
-function safeNumber(value, fallback = 0) {
-  if (value === null || value === undefined || value === "") return fallback
-  const n = Number(value)
-  return Number.isFinite(n) ? n : fallback
-}
-
-function safeInt(value, fallback = 0) {
-  if (value === null || value === undefined || value === "") return fallback
-  const n = parseInt(value, 10)
-  return Number.isFinite(n) ? n : fallback
-}
-
-/* -------------------------------------------------------------------------- */
-/*                               MAIN HANDLER                                 */
-/* -------------------------------------------------------------------------- */
+/* -------------------------------------------------- */
+/* MAIN HANDLER                                       */
+/* -------------------------------------------------- */
 
 export default async function handler(req, res) {
 
@@ -262,16 +282,99 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: "No liquidity pair found" })
     }
 
+    const tokenName = pair?.baseToken?.name || "Unknown Token"
+    const tokenSymbol = pair?.baseToken?.symbol || "UNKNOWN"
+
     const price = safeNumber(pair?.priceUsd)
     const liquidityUSD = safeNumber(pair?.liquidity?.usd)
     const marketCap = safeNumber(pair?.fdv)
+    const volume24h = safeNumber(pair?.volume?.h24)
+    const buys24h = safeInt(pair?.txns?.h24?.buys)
+    const sells24h = safeInt(pair?.txns?.h24?.sells)
+
+    const dexName = pair?.dexId || "unknown"
+    const fdv = safeNumber(pair?.fdv)
+    const scanTime = new Date().toISOString()
+
+    const priceChange24h =
+      pair?.priceChange?.h24 !== undefined &&
+      pair?.priceChange?.h24 !== null
+        ? Number(pair.priceChange.h24)
+        : null
+
+    const pairCreatedAt = pair?.pairCreatedAt
+      ? new Date(pair.pairCreatedAt).toISOString()
+      : null
+
+    const securityData = { ...DEFAULT_SECURITY_DATA, ...(goplusResult || {}) }
+    const holderData = { ...DEFAULT_HOLDER_DATA, ...(moralisResult || {}) }
+
+    const liqRatio = marketCap > 0 ? liquidityUSD / marketCap : null
+    const volRatio = liquidityUSD > 0 ? volume24h / liquidityUSD : null
+
+    const sellPressure =
+      buys24h + sells24h > 0
+        ? sells24h / (buys24h + sells24h)
+        : null
+
+    const contractAgeDays =
+      pairCreatedAt
+        ? (Date.now() - new Date(pairCreatedAt).getTime()) / 86400000
+        : null
+
+    let score = 0
+    const riskSignalSet = new Set()
+
+    if (securityData.honeypot) score += 40
+    if (securityData.cannotSellAll) score += 40
+    if (securityData.cannotBuy) score += 25
+    if (securityData.mintable) score += 15
+    if (securityData.hiddenOwner) score += 20
+
+    if (liquidityUSD < 10000) score += 20
+
+    if (contractAgeDays !== null && contractAgeDays < 7)
+      score += 20
+
+    const riskScore = clamp(Math.round(score), 0, 100)
+
+    const riskLevel =
+      riskScore >= 60 ? "High"
+      : riskScore >= 30 ? "Moderate"
+      : "Low"
+
+    const securityGrade =
+      riskScore >= 60 ? "F"
+      : riskScore >= 45 ? "D"
+      : riskScore >= 30 ? "C"
+      : riskScore >= 15 ? "B"
+      : "A"
 
     const responsePayload = {
+      tokenName,
+      tokenSymbol,
+      address: contractAddress,
+      chain,
       price,
       liquidityUSD,
       marketCap,
-      ...goplusResult,
-      ...moralisResult,
+      volume24h,
+      buys24h,
+      sells24h,
+      priceChange24h,
+      dexName,
+      pairCreatedAt,
+      fdv,
+      scanTime,
+      riskScore,
+      riskLevel,
+      securityGrade,
+      contractAgeDays,
+      sellPressure,
+      liqRatio,
+      volRatio,
+      ...securityData,
+      ...holderData,
     }
 
     setCache(cacheKey, responsePayload)
@@ -285,5 +388,6 @@ export default async function handler(req, res) {
     return res.status(500).json({
       error: "Analyzer failed",
     })
+
   }
 }
