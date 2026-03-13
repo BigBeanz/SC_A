@@ -1,6 +1,3 @@
-Analyze token · JS
-Copy
-
 const PULSECHAIN_RPC = "https://rpc.pulsechain.com"
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 const TRANSFER_TOPIC =
@@ -357,7 +354,7 @@ async function fetchPulsechainLogsChunked(contractAddress, latestBlock) {
 /* MAIN HANDLER                                                        */
 /* ================================================================== */
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
 
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
