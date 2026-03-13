@@ -259,56 +259,81 @@ async function fetchPulsechainTokenMetadata(contractAddress) {
 
 async function fetchPulsechainHolderDistribution(contractAddress) {
   try {
+    // Step 1: Get total supply
+    const totalSupplyHex = await rpcCall("eth_call", [
+      { to: contractAddress, data: "0x18160ddd" }, "latest"
+    ])
+    const totalSupply = hexToBigInt(totalSupplyHex)
+    if (!totalSupply || totalSupply <= 0n) return null
+
+    // Step 2: Scan a tight recent window (500k blocks ~ 2 weeks) to find active addresses
     const latestBlockHex = await rpcCall("eth_blockNumber", [])
     const latestBlock = parseInt(latestBlockHex, 16)
     if (Number.isNaN(latestBlock)) return null
 
-    let logs = null
-    try {
-      logs = await rpcCall("eth_getLogs", [{
-        address:   contractAddress,
-        fromBlock: "0x0",
-        toBlock:   `0x${latestBlock.toString(16)}`,
-        topics:    [TRANSFER_TOPIC],
-      }])
-    } catch {
-      logs = await fetchPulsechainLogsChunked(contractAddress, latestBlock)
+    // Use 500k block chunks — small enough to reliably succeed on PulseChain RPC
+    const SCAN_WINDOW = 500_000
+    const fromBlock = Math.max(0, latestBlock - SCAN_WINDOW)
+
+    // Collect unique addresses from recent Transfer events
+    const addressSet = new Set()
+    const CHUNK = 100_000
+    let cur = fromBlock
+    while (cur < latestBlock && addressSet.size < 500) {
+      const toBlock = Math.min(cur + CHUNK - 1, latestBlock)
+      try {
+        const logs = await rpcCall("eth_getLogs", [{
+          address:   contractAddress,
+          fromBlock: `0x${cur.toString(16)}`,
+          toBlock:   `0x${toBlock.toString(16)}`,
+          topics:    [TRANSFER_TOPIC],
+        }])
+        if (Array.isArray(logs)) {
+          for (const log of logs) {
+            const from = topicToAddress(log?.topics?.[1])
+            const to   = topicToAddress(log?.topics?.[2])
+            if (from && from !== ZERO_ADDRESS) addressSet.add(from)
+            if (to   && to   !== ZERO_ADDRESS) addressSet.add(to)
+          }
+        }
+      } catch {}
+      cur = toBlock + 1
     }
 
-    if (!Array.isArray(logs) || logs.length === 0) return null
+    if (addressSet.size === 0) return null
 
-    const balances = new Map()
-    for (const log of logs) {
-      const from  = topicToAddress(log?.topics?.[1])
-      const to    = topicToAddress(log?.topics?.[2])
-      const value = hexToBigInt(log?.data)
-      if (value === 0n) continue
-      if (from && from !== ZERO_ADDRESS) balances.set(from, (balances.get(from) || 0n) - value)
-      if (to   && to   !== ZERO_ADDRESS) balances.set(to,   (balances.get(to)   || 0n) + value)
+    // Step 3: Query live balances for each discovered address in parallel batches
+    const addresses = [...addressSet]
+    const BATCH = 20
+    const balanceEntries = []
+
+    for (let i = 0; i < addresses.length; i += BATCH) {
+      const batch = addresses.slice(i, i + BATCH)
+      const results = await Promise.allSettled(
+        batch.map(addr => {
+          // balanceOf(address) selector = 0x70a08231, padded address
+          const data = "0x70a08231" + addr.slice(2).toLowerCase().padStart(64, "0")
+          return rpcCall("eth_call", [{ to: contractAddress, data }, "latest"])
+        })
+      )
+      for (let j = 0; j < batch.length; j++) {
+        const r = results[j]
+        if (r.status === "fulfilled" && r.value) {
+          const bal = hexToBigInt(r.value)
+          if (bal > 0n) balanceEntries.push({ address: batch[j], balance: bal })
+        }
+      }
     }
 
-    const positiveBalances = [...balances.entries()]
-      .filter(([, bal]) => bal > 0n)
-      .map(([address, balance]) => ({ address, balance }))
+    if (!balanceEntries.length) return null
 
-    if (!positiveBalances.length) return null
-
-    let totalSupply = null
-    try {
-      const hex = await rpcCall("eth_call", [{ to: contractAddress, data: "0x18160ddd" }, "latest"])
-      totalSupply = hexToBigInt(hex)
-    } catch {
-      totalSupply = positiveBalances.reduce((sum, h) => sum + h.balance, 0n)
-    }
-
-    if (!totalSupply || totalSupply <= 0n) return null
-
-    const holders = positiveBalances
+    // Step 4: Calculate percentages and sort
+    const holders = balanceEntries
       .map(h => ({ ...h, percentage: Number((h.balance * 10000n) / totalSupply) / 100 }))
       .sort((a, b) => b.percentage - a.percentage)
 
     const topHolderPercent = holders[0]?.percentage || null
-    const top5Percent  = holders.slice(0, 5).reduce((s, h)  => s + (h.percentage || 0), 0)
+    const top5Percent  = holders.slice(0, 5).reduce((s, h) => s + (h.percentage || 0), 0)
     const top10Percent = holders.slice(0, 10).reduce((s, h) => s + (h.percentage || 0), 0)
 
     let whaleRisk = "Healthy"
@@ -326,10 +351,10 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
 /* PULSECHAIN CHUNKED LOG FALLBACK                                     */
 /* ------------------------------------------------------------------ */
 
-async function fetchPulsechainLogsChunked(contractAddress, latestBlock) {
+async function fetchPulsechainLogsChunked(contractAddress, latestBlock, fromBlock = 0) {
   const CHUNK_SIZE = 250000
   const MAX_CHUNKS = 40
-  let from = 0, chunkCount = 0
+  let from = fromBlock, chunkCount = 0
   const allLogs = []
 
   while (from <= latestBlock && chunkCount < MAX_CHUNKS) {
