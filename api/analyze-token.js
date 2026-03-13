@@ -264,12 +264,14 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
       { to: contractAddress, data: "0x18160ddd" }, "latest"
     ])
     const totalSupply = hexToBigInt(totalSupplyHex)
-    if (!totalSupply || totalSupply <= 0n) return null
+    console.log("PulseChain totalSupply:", totalSupply.toString())
+    if (!totalSupply || totalSupply <= 0n) { console.log("PulseChain: totalSupply is zero, aborting"); return null }
 
     // Step 2: Scan a tight recent window (500k blocks ~ 2 weeks) to find active addresses
     const latestBlockHex = await rpcCall("eth_blockNumber", [])
     const latestBlock = parseInt(latestBlockHex, 16)
-    if (Number.isNaN(latestBlock)) return null
+    console.log("PulseChain latestBlock:", latestBlock)
+    if (Number.isNaN(latestBlock)) { console.log("PulseChain: latestBlock is NaN, aborting"); return null }
 
     // Use 500k block chunks — small enough to reliably succeed on PulseChain RPC
     const SCAN_WINDOW = 500_000
@@ -300,7 +302,8 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
       cur = toBlock + 1
     }
 
-    if (addressSet.size === 0) return null
+    console.log("PulseChain: discovered addresses:", addressSet.size)
+    if (addressSet.size === 0) { console.log("PulseChain: no addresses found in scan window"); return null }
 
     // Step 3: Query live balances for each discovered address in parallel batches
     const addresses = [...addressSet]
@@ -325,7 +328,8 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
       }
     }
 
-    if (!balanceEntries.length) return null
+    console.log("PulseChain: balanceEntries with positive balance:", balanceEntries.length)
+    if (!balanceEntries.length) { console.log("PulseChain: no positive balances found"); return null }
 
     // Step 4: Calculate percentages and sort
     const holders = balanceEntries
@@ -340,6 +344,7 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     if (top10Percent > 60) whaleRisk = "High"
     else if (top10Percent > 40) whaleRisk = "Moderate"
 
+    console.log("PulseChain holder result:", { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length })
     return { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length }
   } catch (e) {
     console.error("PulseChain holder reconstruction error", e)
