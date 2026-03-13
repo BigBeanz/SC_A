@@ -137,9 +137,29 @@ async function fetchDexScreener(contractAddress, chain) {
     const json = await res.json()
 
     const pairs = json?.pairs || []
-    const chainPairs = pairs.filter((p) => p.chainId === chain)
 
-    const scoredPairs = (chainPairs.length ? chainPairs : pairs).map((p) => ({
+    // CRITICAL: Only use pairs where the base token address matches what we searched for.
+    // DexScreener can return pairs for other tokens (e.g. the quote token), which causes
+    // the wrong token data to be displayed entirely.
+    const addr = contractAddress.toLowerCase()
+    const matchingPairs = pairs.filter((p) =>
+      p?.baseToken?.address?.toLowerCase() === addr ||
+      p?.quoteToken?.address?.toLowerCase() === addr
+    )
+
+    // Prefer pairs where it's the BASE token (not quote), on the correct chain
+    const basePairs = matchingPairs.filter((p) =>
+      p?.baseToken?.address?.toLowerCase() === addr
+    )
+
+    const chainFiltered = (basePairs.length ? basePairs : matchingPairs)
+      .filter((p) => p.chainId === chain)
+
+    // Fall back to any matching pair if no chain match
+    const pool = chainFiltered.length ? chainFiltered
+      : (basePairs.length ? basePairs : matchingPairs)
+
+    const scoredPairs = pool.map((p) => ({
       pair: p,
       score: safeNumber(p?.liquidity?.usd) * 0.6 + safeNumber(p?.volume?.h24) * 0.4,
     }))
