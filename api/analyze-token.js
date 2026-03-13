@@ -273,14 +273,15 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     console.log("PulseChain latestBlock:", latestBlock)
     if (Number.isNaN(latestBlock)) { console.log("PulseChain: latestBlock is NaN, aborting"); return null }
 
-    // Use 500k block chunks — small enough to reliably succeed on PulseChain RPC
-    const SCAN_WINDOW = 500_000
-    const fromBlock = Math.max(0, latestBlock - SCAN_WINDOW)
-
-    // Collect unique addresses from recent Transfer events
+    // Use small chunks to avoid RPC result-size limits on high-volume tokens like PLSX
+    // Start with last 10k blocks, use 2k chunks — guaranteed to fit within RPC limits
     const addressSet = new Set()
-    const CHUNK = 100_000
+    const SCAN_WINDOW = 10_000   // ~1 hour of blocks on PulseChain
+    const CHUNK = 2_000          // small enough that even PLSX won't overflow RPC
+
+    const fromBlock = Math.max(0, latestBlock - SCAN_WINDOW)
     let cur = fromBlock
+
     while (cur < latestBlock && addressSet.size < 500) {
       const toBlock = Math.min(cur + CHUNK - 1, latestBlock)
       try {
@@ -298,12 +299,44 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
             if (to   && to   !== ZERO_ADDRESS) addressSet.add(to)
           }
         }
-      } catch {}
+      } catch (e) {
+        console.error(`PulseChain: chunk ${cur}-${toBlock} failed:`, e.message)
+      }
       cur = toBlock + 1
     }
 
     console.log("PulseChain: discovered addresses:", addressSet.size)
-    if (addressSet.size === 0) { console.log("PulseChain: no addresses found in scan window"); return null }
+
+    // If still empty, token may have very low recent activity — try a wider window
+    if (addressSet.size === 0) {
+      const wideFrom = Math.max(0, latestBlock - 100_000)
+      let wideCur = wideFrom
+      while (wideCur < latestBlock && addressSet.size < 500) {
+        const toBlock = Math.min(wideCur + CHUNK - 1, latestBlock)
+        try {
+          const logs = await rpcCall("eth_getLogs", [{
+            address:   contractAddress,
+            fromBlock: `0x${wideCur.toString(16)}`,
+            toBlock:   `0x${toBlock.toString(16)}`,
+            topics:    [TRANSFER_TOPIC],
+          }])
+          if (Array.isArray(logs)) {
+            for (const log of logs) {
+              const from = topicToAddress(log?.topics?.[1])
+              const to   = topicToAddress(log?.topics?.[2])
+              if (from && from !== ZERO_ADDRESS) addressSet.add(from)
+              if (to   && to   !== ZERO_ADDRESS) addressSet.add(to)
+            }
+          }
+        } catch (e) {
+          console.error(`PulseChain wide chunk ${wideCur}-${toBlock} failed:`, e.message)
+        }
+        wideCur = toBlock + 1
+      }
+      console.log("PulseChain: wide scan discovered addresses:", addressSet.size)
+    }
+
+    if (addressSet.size === 0) { console.log("PulseChain: no addresses found"); return null }
 
     // Step 3: Query live balances for each discovered address in parallel batches
     const addresses = [...addressSet]
