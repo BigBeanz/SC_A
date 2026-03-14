@@ -1,11 +1,14 @@
+Analyze token · JS
+Copy
+
 const PULSECHAIN_RPC = "https://rpc.pulsechain.com"
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-
+ 
 const CACHE_TTL_MS = 30 * 1000
 const RESPONSE_CACHE = new Map()
-
+ 
 const DEFAULT_SECURITY_DATA = {
   honeypot: null,
   mintable: null,
@@ -30,18 +33,18 @@ const DEFAULT_SECURITY_DATA = {
   ownerChangeBalance: null,
   isWhitelisted: null,
 }
-
+ 
 const DEFAULT_HOLDER_DATA = {
   topHolderPercent: null,
   top5Percent: null,
   top10Percent: null,
   whaleRisk: null,
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* CACHE HELPERS                                                       */
 /* ------------------------------------------------------------------ */
-
+ 
 function getCache(key) {
   const entry = RESPONSE_CACHE.get(key)
   if (!entry) return null
@@ -51,34 +54,34 @@ function getCache(key) {
   }
   return entry.data
 }
-
+ 
 function setCache(key, data) {
   RESPONSE_CACHE.set(key, {
     data,
     expiresAt: Date.now() + CACHE_TTL_MS,
   })
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* UTILITY HELPERS                                                     */
 /* ------------------------------------------------------------------ */
-
+ 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value))
 }
-
+ 
 function safeNumber(value, fallback = 0) {
   if (value === null || value === undefined || value === "") return fallback
   const n = Number(value)
   return Number.isFinite(n) ? n : fallback
 }
-
+ 
 function safeInt(value, fallback = 0) {
   if (value === null || value === undefined || value === "") return fallback
   const n = parseInt(value, 10)
   return Number.isFinite(n) ? n : fallback
 }
-
+ 
 function decodeAbiString(hex) {
   if (!hex || hex === "0x") return null
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex
@@ -98,23 +101,23 @@ function decodeAbiString(hex) {
   } catch {}
   return null
 }
-
+ 
 function topicToAddress(topic) {
   if (!topic || typeof topic !== "string") return null
   const clean = topic.toLowerCase().replace(/^0x/, "")
   if (clean.length < 40) return null
   return `0x${clean.slice(-40)}`
 }
-
+ 
 function hexToBigInt(hex) {
   if (!hex || hex === "0x") return 0n
   return BigInt(hex)
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* PULSECHAIN RPC                                                      */
 /* ------------------------------------------------------------------ */
-
+ 
 async function rpcCall(method, params) {
   const res = await fetch(PULSECHAIN_RPC, {
     method: "POST",
@@ -125,19 +128,19 @@ async function rpcCall(method, params) {
   if (json?.error) throw new Error(json.error.message || "RPC error")
   return json?.result
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* DEXSCREENER                                                         */
 /* ------------------------------------------------------------------ */
-
+ 
 async function fetchDexScreener(contractAddress, chain) {
   try {
     const url = `https://api.dexscreener.com/latest/dex/tokens/${contractAddress}`
     const res = await fetch(url)
     const json = await res.json()
-
+ 
     const pairs = json?.pairs || []
-
+ 
     // CRITICAL: Only use pairs where the base token address matches what we searched for.
     // DexScreener can return pairs for other tokens (e.g. the quote token), which causes
     // the wrong token data to be displayed entirely.
@@ -146,24 +149,24 @@ async function fetchDexScreener(contractAddress, chain) {
       p?.baseToken?.address?.toLowerCase() === addr ||
       p?.quoteToken?.address?.toLowerCase() === addr
     )
-
+ 
     // Prefer pairs where it's the BASE token (not quote), on the correct chain
     const basePairs = matchingPairs.filter((p) =>
       p?.baseToken?.address?.toLowerCase() === addr
     )
-
+ 
     const chainFiltered = (basePairs.length ? basePairs : matchingPairs)
       .filter((p) => p.chainId === chain)
-
+ 
     // Fall back to any matching pair if no chain match
     const pool = chainFiltered.length ? chainFiltered
       : (basePairs.length ? basePairs : matchingPairs)
-
+ 
     const scoredPairs = pool.map((p) => ({
       pair: p,
       score: safeNumber(p?.liquidity?.usd) * 0.6 + safeNumber(p?.volume?.h24) * 0.4,
     }))
-
+ 
     const selected = scoredPairs.sort((a, b) => b.score - a.score)[0]?.pair || null
     return { pair: selected }
   } catch (e) {
@@ -171,26 +174,26 @@ async function fetchDexScreener(contractAddress, chain) {
     return { pair: null }
   }
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* GOPLUS SECURITY                                                     */
 /* ------------------------------------------------------------------ */
-
+ 
 async function fetchGoPlus(contractAddress, goplusChain) {
   if (!goplusChain) return null
-
+ 
   try {
     const url = `https://api.gopluslabs.io/api/v1/token_security/${goplusChain}?contract_addresses=${contractAddress}`
     const res = await fetch(url)
     const json = await res.json()
-
+ 
     const tokenSecurity = json?.result?.[contractAddress.toLowerCase()] || {}
-
+ 
     const bool = (v) => (v === "1" ? true : v === "0" ? false : null)
     const pct  = (v) => (v !== undefined && v !== null && v !== "" ? parseFloat(v) : null)
-
+ 
     const ownerAddress = tokenSecurity.owner_address || null
-
+ 
     return {
       honeypot:            bool(tokenSecurity.is_honeypot),
       mintable:            bool(tokenSecurity.is_mintable),
@@ -220,43 +223,88 @@ async function fetchGoPlus(contractAddress, goplusChain) {
     return null
   }
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* MORALIS HOLDERS                                                     */
 /* ------------------------------------------------------------------ */
-
+ 
+async function fetchContractAge(contractAddress, chain) {
+  // Map chain to Etherscan-compatible API endpoint
+  const endpoints = {
+    ethereum: { url: "https://api.etherscan.io/api",       key: process.env.ETHERSCAN_API_KEY },
+    polygon:  { url: "https://api.polygonscan.com/api",    key: process.env.POLYGONSCAN_API_KEY || process.env.ETHERSCAN_API_KEY },
+    bsc:      { url: "https://api.bscscan.com/api",        key: process.env.BSCSCAN_API_KEY    || process.env.ETHERSCAN_API_KEY },
+    arbitrum: { url: "https://api.arbiscan.io/api",        key: process.env.ARBISCAN_API_KEY   || process.env.ETHERSCAN_API_KEY },
+  }
+ 
+  const ep = endpoints[chain]
+  if (!ep || !ep.key) return null
+ 
+  try {
+    // Step 1: get the creation tx hash
+    const txRes = await fetch(
+      `${ep.url}?module=contract&action=getcontractcreation&contractaddresses=${contractAddress}&apikey=${ep.key}`
+    )
+    const txJson = await txRes.json()
+    const creationTx = txJson?.result?.[0]?.txHash
+    if (!creationTx) return null
+ 
+    // Step 2: get the block timestamp from that tx
+    const blockRes = await fetch(
+      `${ep.url}?module=proxy&action=eth_getTransactionByHash&txhash=${creationTx}&apikey=${ep.key}`
+    )
+    const blockJson = await blockRes.json()
+    const blockNumber = blockJson?.result?.blockNumber
+    if (!blockNumber) return null
+ 
+    const tsRes = await fetch(
+      `${ep.url}?module=block&action=getblockreward&blockno=${parseInt(blockNumber, 16)}&apikey=${ep.key}`
+    )
+    const tsJson = await tsRes.json()
+    const timestamp = tsJson?.result?.timeStamp
+    if (!timestamp) return null
+ 
+    const deployedMs = parseInt(timestamp) * 1000
+    const ageDays = (Date.now() - deployedMs) / 86400000
+    return ageDays > 0 ? ageDays : null
+  } catch (e) {
+    console.error("fetchContractAge error:", e.message)
+    return null
+  }
+}
+ 
 async function fetchMoralisHolders(contractAddress, moralisChain) {
   if (!moralisChain || !process.env.MORALIS_API_KEY) return null
-
+ 
   try {
     const url = `https://deep-index.moralis.io/api/v2.2/erc20/${contractAddress}/owners?chain=${moralisChain}&limit=10`
     const res = await fetch(url, {
       headers: { "X-API-Key": process.env.MORALIS_API_KEY },
     })
-
+ 
     const json = await res.json()
     const holders = json?.result || []
     if (!holders.length) return null
-
+ 
     const topHolderPercent = holders[0]?.percentage || null
     const top5Percent  = holders.slice(0, 5).reduce((s, h) => s + (h.percentage || 0), 0)
     const top10Percent = holders.slice(0, 10).reduce((s, h) => s + (h.percentage || 0), 0)
-
+ 
     let whaleRisk = "Healthy"
     if (top10Percent > 60) whaleRisk = "High"
     else if (top10Percent > 40) whaleRisk = "Moderate"
-
+ 
     return { topHolderPercent, top5Percent, top10Percent, whaleRisk }
   } catch (e) {
     console.error("Moralis error", e)
     return null
   }
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* PULSECHAIN TOKEN METADATA                                           */
 /* ------------------------------------------------------------------ */
-
+ 
 async function fetchPulsechainTokenMetadata(contractAddress) {
   try {
     const [nameHex, symbolHex] = await Promise.all([
@@ -272,11 +320,11 @@ async function fetchPulsechainTokenMetadata(contractAddress) {
     return null
   }
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* PULSECHAIN HOLDER DISTRIBUTION                                      */
 /* ------------------------------------------------------------------ */
-
+ 
 async function fetchPulsechainHolderDistribution(contractAddress) {
   try {
     // Step 1: Get total supply
@@ -286,22 +334,22 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     const totalSupply = hexToBigInt(totalSupplyHex)
     console.log("PulseChain totalSupply:", totalSupply.toString())
     if (!totalSupply || totalSupply <= 0n) { console.log("PulseChain: totalSupply is zero, aborting"); return null }
-
+ 
     // Step 2: Scan a tight recent window (500k blocks ~ 2 weeks) to find active addresses
     const latestBlockHex = await rpcCall("eth_blockNumber", [])
     const latestBlock = parseInt(latestBlockHex, 16)
     console.log("PulseChain latestBlock:", latestBlock)
     if (Number.isNaN(latestBlock)) { console.log("PulseChain: latestBlock is NaN, aborting"); return null }
-
+ 
     // Use small chunks to avoid RPC result-size limits on high-volume tokens like PLSX
     // Start with last 10k blocks, use 2k chunks — guaranteed to fit within RPC limits
     const addressSet = new Set()
     const SCAN_WINDOW = 10_000   // ~1 hour of blocks on PulseChain
     const CHUNK = 2_000          // small enough that even PLSX won't overflow RPC
-
+ 
     const fromBlock = Math.max(0, latestBlock - SCAN_WINDOW)
     let cur = fromBlock
-
+ 
     while (cur < latestBlock && addressSet.size < 500) {
       const toBlock = Math.min(cur + CHUNK - 1, latestBlock)
       try {
@@ -324,9 +372,9 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
       }
       cur = toBlock + 1
     }
-
+ 
     console.log("PulseChain: discovered addresses:", addressSet.size)
-
+ 
     // If still empty, token may have very low recent activity — try a wider window
     if (addressSet.size === 0) {
       const wideFrom = Math.max(0, latestBlock - 100_000)
@@ -355,14 +403,14 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
       }
       console.log("PulseChain: wide scan discovered addresses:", addressSet.size)
     }
-
+ 
     if (addressSet.size === 0) { console.log("PulseChain: no addresses found"); return null }
-
+ 
     // Step 3: Query live balances for each discovered address in parallel batches
     const addresses = [...addressSet]
     const BATCH = 20
     const balanceEntries = []
-
+ 
     for (let i = 0; i < addresses.length; i += BATCH) {
       const batch = addresses.slice(i, i + BATCH)
       const results = await Promise.allSettled(
@@ -380,23 +428,23 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
         }
       }
     }
-
+ 
     console.log("PulseChain: balanceEntries with positive balance:", balanceEntries.length)
     if (!balanceEntries.length) { console.log("PulseChain: no positive balances found"); return null }
-
+ 
     // Step 4: Calculate percentages and sort
     const holders = balanceEntries
       .map(h => ({ ...h, percentage: Number((h.balance * 10000n) / totalSupply) / 100 }))
       .sort((a, b) => b.percentage - a.percentage)
-
+ 
     const topHolderPercent = holders[0]?.percentage || null
     const top5Percent  = holders.slice(0, 5).reduce((s, h) => s + (h.percentage || 0), 0)
     const top10Percent = holders.slice(0, 10).reduce((s, h) => s + (h.percentage || 0), 0)
-
+ 
     let whaleRisk = "Healthy"
     if (top10Percent > 60) whaleRisk = "High"
     else if (top10Percent > 40) whaleRisk = "Moderate"
-
+ 
     console.log("PulseChain holder result:", { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length })
     return { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length }
   } catch (e) {
@@ -404,17 +452,17 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     return null
   }
 }
-
+ 
 /* ------------------------------------------------------------------ */
 /* PULSECHAIN CHUNKED LOG FALLBACK                                     */
 /* ------------------------------------------------------------------ */
-
+ 
 async function fetchPulsechainLogsChunked(contractAddress, latestBlock, fromBlock = 0) {
   const CHUNK_SIZE = 250000
   const MAX_CHUNKS = 40
   let from = fromBlock, chunkCount = 0
   const allLogs = []
-
+ 
   while (from <= latestBlock && chunkCount < MAX_CHUNKS) {
     const to = Math.min(from + CHUNK_SIZE - 1, latestBlock)
     try {
@@ -429,35 +477,35 @@ async function fetchPulsechainLogsChunked(contractAddress, latestBlock, fromBloc
     from = to + 1
     chunkCount++
   }
-
+ 
   return allLogs
 }
-
+ 
 /* ================================================================== */
 /* MAIN HANDLER                                                        */
 /* ================================================================== */
-
+ 
 module.exports = async function handler(req, res) {
-
+ 
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type")
-
+ 
   if (req.method === "OPTIONS") return res.status(200).end()
-
+ 
   try {
-
+ 
     const contractAddress = req.body?.contractAddress || req.body?.address
     const chain = req.body?.chain || "ethereum"
-
+ 
     if (!contractAddress) {
       return res.status(400).json({ error: "Missing contractAddress" })
     }
-
+ 
     const cacheKey = `${chain}:${contractAddress.toLowerCase()}`
     const cached = getCache(cacheKey)
     if (cached) return res.status(200).json(cached)
-
+ 
     const chainMap = {
       ethereum:   { moralis: "eth",     goplus: "1"     },
       bsc:        { moralis: "bsc",     goplus: "56"    },
@@ -465,29 +513,30 @@ module.exports = async function handler(req, res) {
       arbitrum:   { moralis: "arbitrum",goplus: "42161" },
       pulsechain: { moralis: null,      goplus: null    },
     }
-
+ 
     const moralisChain = chainMap[chain]?.moralis || null
     const goplusChain  = chainMap[chain]?.goplus  || null
-
-    const [dexResult, goplusResult, moralisResult, pulseMetaResult, pulseHolderResult] =
+ 
+    const [dexResult, goplusResult, moralisResult, pulseMetaResult, pulseHolderResult, contractAgeResult] =
       await Promise.all([
         fetchDexScreener(contractAddress, chain),
         fetchGoPlus(contractAddress, goplusChain),
         fetchMoralisHolders(contractAddress, moralisChain),
         chain === "pulsechain" ? fetchPulsechainTokenMetadata(contractAddress)      : Promise.resolve(null),
         chain === "pulsechain" ? fetchPulsechainHolderDistribution(contractAddress) : Promise.resolve(null),
+        chain !== "pulsechain" ? fetchContractAge(contractAddress, chain)           : Promise.resolve(null),
       ])
-
+ 
     const pair = dexResult?.pair || null
-
+ 
     if (!pair) {
       return res.status(404).json({ error: "No liquidity pair found" })
     }
-
+ 
     /* ---- Token identity ---- */
     const tokenName   = pair?.baseToken?.name   || pulseMetaResult?.name   || "Unknown Token"
     const tokenSymbol = pair?.baseToken?.symbol || pulseMetaResult?.symbol || "UNKNOWN"
-
+ 
     /* ---- Market data ---- */
     const price        = safeNumber(pair?.priceUsd)
     const liquidityUSD = safeNumber(pair?.liquidity?.usd)
@@ -498,36 +547,39 @@ module.exports = async function handler(req, res) {
     const dexName      = pair?.dexId || "unknown"
     const fdv          = safeNumber(pair?.fdv)
     const scanTime     = new Date().toISOString()
-
+ 
     const priceChange24h = pair?.priceChange?.h24 !== undefined && pair?.priceChange?.h24 !== null
       ? Number(pair.priceChange.h24) : null
-
+ 
     const pairCreatedAt = pair?.pairCreatedAt
       ? new Date(pair.pairCreatedAt).toISOString() : null
-
+ 
     /* ---- Security + holder data ---- */
     const securityData = { ...DEFAULT_SECURITY_DATA, ...(goplusResult || {}) }
     const holderData   = { ...DEFAULT_HOLDER_DATA,   ...(moralisResult || pulseHolderResult || {}) }
-
+ 
     // Backfill holderCount from PulseChain RPC if GoPlus didn't return it
     if (securityData.holderCount == null && pulseHolderResult?.holderCount != null) {
       securityData.holderCount = pulseHolderResult.holderCount
     }
-
+ 
     /* ---- Pre-calculated metrics ---- */
     const liqRatio       = marketCap > 0              ? liquidityUSD / marketCap               : null
     const volRatio       = liquidityUSD > 0           ? volume24h    / liquidityUSD            : null
     const sellPressure   = buys24h + sells24h > 0     ? sells24h     / (buys24h + sells24h)    : null
-    const contractAgeDays= pairCreatedAt
-      ? (Date.now() - new Date(pairCreatedAt).getTime()) / 86400000 : null
-
+    const contractAgeDays= contractAgeResult !== null
+      ? contractAgeResult  // real deployment date from Etherscan
+      : pairCreatedAt      // fallback: pair creation (less accurate but better than nothing)
+        ? (Date.now() - new Date(pairCreatedAt).getTime()) / 86400000
+        : null
+ 
     /* ---------------------------------------------------------------- */
     /* RISK SCORE                                                        */
     /* ---------------------------------------------------------------- */
-
+ 
     let score = 0
     const riskSignalSet = new Set()
-
+ 
     // — Contract / control risks (GoPlus) —
     if (securityData.honeypot === true)             { score += 40; riskSignalSet.add("honeypot") }
     if (securityData.cannotSellAll === true)         { score += 40; riskSignalSet.add("cannotSellAll") }
@@ -541,18 +593,18 @@ module.exports = async function handler(req, res) {
     if (securityData.proxyContract === true)         { score += 8;  riskSignalSet.add("proxyContract") }
     if (securityData.canTakeBackOwnership === true)  { score += 15; riskSignalSet.add("canTakeBackOwnership") }
     if ((securityData.sellTax ?? 0) > 10)            { score += 10; riskSignalSet.add("highSellTax") }
-
+ 
     // — Liquidity risks —
     if (liquidityUSD < 10000)                        { score += 20; riskSignalSet.add("lowLiquidity") }
     if (liqRatio !== null && liqRatio < 0.02)        { score += 25; riskSignalSet.add("extremeLiquidityRisk") }
     else if (liqRatio !== null && liqRatio < 0.05)   { score += 15; riskSignalSet.add("lowLiquiditySupport") }
     if (volRatio !== null && volRatio > 8)            { score += 15; riskSignalSet.add("washTradingSuspected") }
-
+ 
     // — Whale concentration risks —
     if ((holderData.topHolderPercent ?? 0) > 20)     { score += 10; riskSignalSet.add("highTopHolderConcentration") }
     if ((holderData.top5Percent ?? 0) > 40)           { score += 25; riskSignalSet.add("whaleConcentration") }
     if ((holderData.top10Percent ?? 0) > 60)          { score += 30; riskSignalSet.add("extremeWhaleControl") }
-
+ 
     // — Market health signals (DexScreener — always available) —
     if (priceChange24h !== null) {
       const drop = Math.abs(Math.min(0, priceChange24h))
@@ -560,22 +612,22 @@ module.exports = async function handler(req, res) {
       else if (drop >= 25) { score += 18; riskSignalSet.add("significantDropDetected") }
       else if (drop >= 15) { score += 8;  riskSignalSet.add("priceDropDetected") }
     }
-
+ 
     if (contractAgeDays !== null) {
       if (contractAgeDays < 1)       { score += 30; riskSignalSet.add("veryNewToken") }
       else if (contractAgeDays < 7)  { score += 20; riskSignalSet.add("newToken") }
       else if (contractAgeDays < 30) { score += 8;  riskSignalSet.add("recentToken") }
     }
-
+ 
     if (contractAgeDays !== null && contractAgeDays < 7 && liquidityUSD < 50000) {
       score += 20; riskSignalSet.add("newTokenLowLiquidity")
     }
-
+ 
     if (sellPressure !== null) {
       if (sellPressure > 0.75)      { score += 20; riskSignalSet.add("heavySellPressure") }
       else if (sellPressure > 0.65) { score += 10; riskSignalSet.add("elevatedSellPressure") }
     }
-
+ 
     const marketActivityRatio = marketCap > 0 ? volume24h / marketCap : null
     if (marketActivityRatio !== null && marketActivityRatio < 0.001 && marketCap > 10000) {
       score += 12; riskSignalSet.add("lowMarketActivity")
@@ -583,22 +635,22 @@ module.exports = async function handler(req, res) {
     if (volume24h < 500 && marketCap > 5000) {
       score += 15; riskSignalSet.add("inactiveToken")
     }
-
+ 
     const riskScore     = clamp(Math.round(score), 0, 100)
     const riskLevel     = riskScore >= 60 ? "High" : riskScore >= 30 ? "Moderate" : "Low"
     const securityGrade = riskScore >= 60 ? "F" : riskScore >= 45 ? "D" : riskScore >= 30 ? "C" : riskScore >= 15 ? "B" : "A"
     const riskSignals   = Array.from(riskSignalSet)
-
+ 
     /* ---------------------------------------------------------------- */
     /* RESPONSE                                                          */
     /* ---------------------------------------------------------------- */
-
+ 
     const responsePayload = {
       tokenName,
       tokenSymbol,
       address: contractAddress,
       chain,
-
+ 
       price,
       liquidityUSD,
       marketCap,
@@ -610,24 +662,24 @@ module.exports = async function handler(req, res) {
       pairCreatedAt,
       fdv,
       scanTime,
-
+ 
       riskScore,
       riskLevel,
       securityGrade,
       riskSignals,
-
+ 
       contractAgeDays,
       sellPressure,
       liqRatio,
       volRatio,
-
+ 
       ...securityData,
       ...holderData,
     }
-
+ 
     setCache(cacheKey, responsePayload)
     return res.status(200).json(responsePayload)
-
+ 
   } catch (error) {
     console.error("Analyzer error:", error)
     return res.status(500).json({ error: "Analyzer failed" })
