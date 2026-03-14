@@ -332,56 +332,34 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     console.log("PulseChain totalSupply:", totalSupply.toString())
     if (!totalSupply || totalSupply <= 0n) { console.log("PulseChain: totalSupply is zero, aborting"); return null }
 
-    // Step 2: Scan a tight recent window (500k blocks ~ 2 weeks) to find active addresses
+    // Step 2: Progressive scan -- expand window until we have enough unique addresses.
+    // Top holders rarely trade so a small recent window misses them entirely.
+    // Stages: 10k -> 50k -> 200k -> 500k -> 2M blocks, stopping at 200+ addresses.
     const latestBlockHex = await rpcCall("eth_blockNumber", [])
     const latestBlock = parseInt(latestBlockHex, 16)
     console.log("PulseChain latestBlock:", latestBlock)
     if (Number.isNaN(latestBlock)) { console.log("PulseChain: latestBlock is NaN, aborting"); return null }
 
-    // Use small chunks to avoid RPC result-size limits on high-volume tokens like PLSX
-    // Start with last 10k blocks, use 2k chunks — guaranteed to fit within RPC limits
+    const CHUNK = 2_000          // small enough that even PLSX won't overflow RPC result limit
+    const MIN_ADDRESSES = 200    // keep expanding until we have at least this many candidates
+    const MAX_ADDRESSES = 800    // cap to keep balanceOf phase fast
+    const WINDOWS = [10_000, 50_000, 200_000, 500_000, 2_000_000]
     const addressSet = new Set()
-    const SCAN_WINDOW = 10_000   // ~1 hour of blocks on PulseChain
-    const CHUNK = 2_000          // small enough that even PLSX won't overflow RPC
 
-    const fromBlock = Math.max(0, latestBlock - SCAN_WINDOW)
-    let cur = fromBlock
+    for (let wi = 0; wi < WINDOWS.length; wi++) {
+      if (addressSet.size >= MIN_ADDRESSES) break
+      const window = WINDOWS[wi]
+      const fromBlock = Math.max(0, latestBlock - window)
+      let cur = fromBlock
+      let chunksThisWindow = 0
+      const MAX_CHUNKS = 150
 
-    while (cur < latestBlock && addressSet.size < 500) {
-      const toBlock = Math.min(cur + CHUNK - 1, latestBlock)
-      try {
-        const logs = await rpcCall("eth_getLogs", [{
-          address:   contractAddress,
-          fromBlock: `0x${cur.toString(16)}`,
-          toBlock:   `0x${toBlock.toString(16)}`,
-          topics:    [TRANSFER_TOPIC],
-        }])
-        if (Array.isArray(logs)) {
-          for (const log of logs) {
-            const from = topicToAddress(log?.topics?.[1])
-            const to   = topicToAddress(log?.topics?.[2])
-            if (from && from !== ZERO_ADDRESS) addressSet.add(from)
-            if (to   && to   !== ZERO_ADDRESS) addressSet.add(to)
-          }
-        }
-      } catch (e) {
-        console.error(`PulseChain: chunk ${cur}-${toBlock} failed:`, e.message)
-      }
-      cur = toBlock + 1
-    }
-
-    console.log("PulseChain: discovered addresses:", addressSet.size)
-
-    // If still empty, token may have very low recent activity — try a wider window
-    if (addressSet.size === 0) {
-      const wideFrom = Math.max(0, latestBlock - 100_000)
-      let wideCur = wideFrom
-      while (wideCur < latestBlock && addressSet.size < 500) {
-        const toBlock = Math.min(wideCur + CHUNK - 1, latestBlock)
+      while (cur < latestBlock && addressSet.size < MAX_ADDRESSES && chunksThisWindow < MAX_CHUNKS) {
+        const toBlock = Math.min(cur + CHUNK - 1, latestBlock)
         try {
           const logs = await rpcCall("eth_getLogs", [{
             address:   contractAddress,
-            fromBlock: `0x${wideCur.toString(16)}`,
+            fromBlock: `0x${cur.toString(16)}`,
             toBlock:   `0x${toBlock.toString(16)}`,
             topics:    [TRANSFER_TOPIC],
           }])
@@ -394,25 +372,27 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
             }
           }
         } catch (e) {
-          console.error(`PulseChain wide chunk ${wideCur}-${toBlock} failed:`, e.message)
+          console.error(`PulseChain: chunk ${cur}-${toBlock} failed:`, e.message)
         }
-        wideCur = toBlock + 1
+        cur = toBlock + 1
+        chunksThisWindow++
       }
-      console.log("PulseChain: wide scan discovered addresses:", addressSet.size)
+
+      console.log(`PulseChain: after ${window}-block window -- addresses: ${addressSet.size}`)
     }
 
-    if (addressSet.size === 0) { console.log("PulseChain: no addresses found"); return null }
+    console.log("PulseChain: total discovered addresses:", addressSet.size)
+    if (addressSet.size === 0) { console.log("PulseChain: no addresses found in any window"); return null }
 
-    // Step 3: Query live balances for each discovered address in parallel batches
+    // Step 3: Query live balances in batches of 30
     const addresses = [...addressSet]
-    const BATCH = 20
+    const BATCH = 30
     const balanceEntries = []
 
     for (let i = 0; i < addresses.length; i += BATCH) {
       const batch = addresses.slice(i, i + BATCH)
       const results = await Promise.allSettled(
         batch.map(addr => {
-          // balanceOf(address) selector = 0x70a08231, padded address
           const data = "0x70a08231" + addr.slice(2).toLowerCase().padStart(64, "0")
           return rpcCall("eth_call", [{ to: contractAddress, data }, "latest"])
         })
@@ -429,12 +409,12 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     console.log("PulseChain: balanceEntries with positive balance:", balanceEntries.length)
     if (!balanceEntries.length) { console.log("PulseChain: no positive balances found"); return null }
 
-    // Step 4: Calculate percentages and sort
+    // Step 4: Sort descending, calculate percentages against total supply
     const holders = balanceEntries
       .map(h => ({ ...h, percentage: Number((h.balance * 10000n) / totalSupply) / 100 }))
       .sort((a, b) => b.percentage - a.percentage)
 
-    const topHolderPercent = holders[0]?.percentage || null
+    const topHolderPercent = holders[0]?.percentage ?? null
     const top5Percent  = holders.slice(0, 5).reduce((s, h) => s + (h.percentage || 0), 0)
     const top10Percent = holders.slice(0, 10).reduce((s, h) => s + (h.percentage || 0), 0)
 
@@ -442,7 +422,7 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     if (top10Percent > 60) whaleRisk = "High"
     else if (top10Percent > 40) whaleRisk = "Moderate"
 
-    console.log("PulseChain holder result:", { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length })
+    console.log("PulseChain holder result:", { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length, scanned: addressSet.size })
     return { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length }
   } catch (e) {
     console.error("PulseChain holder reconstruction error", e)
@@ -577,7 +557,7 @@ module.exports = async function handler(req, res) {
     let score = 0
     const riskSignalSet = new Set()
 
-    // — Contract / control risks (GoPlus) —
+    // -- Contract / control risks (GoPlus) --
     if (securityData.honeypot === true)             { score += 40; riskSignalSet.add("honeypot") }
     if (securityData.cannotSellAll === true)         { score += 40; riskSignalSet.add("cannotSellAll") }
     if (securityData.cannotBuy === true)             { score += 25; riskSignalSet.add("cannotBuy") }
@@ -591,18 +571,18 @@ module.exports = async function handler(req, res) {
     if (securityData.canTakeBackOwnership === true)  { score += 15; riskSignalSet.add("canTakeBackOwnership") }
     if ((securityData.sellTax ?? 0) > 10)            { score += 10; riskSignalSet.add("highSellTax") }
 
-    // — Liquidity risks —
+    // -- Liquidity risks --
     if (liquidityUSD < 10000)                        { score += 20; riskSignalSet.add("lowLiquidity") }
     if (liqRatio !== null && liqRatio < 0.02)        { score += 25; riskSignalSet.add("extremeLiquidityRisk") }
     else if (liqRatio !== null && liqRatio < 0.05)   { score += 15; riskSignalSet.add("lowLiquiditySupport") }
     if (volRatio !== null && volRatio > 8)            { score += 15; riskSignalSet.add("washTradingSuspected") }
 
-    // — Whale concentration risks —
+    // -- Whale concentration risks --
     if ((holderData.topHolderPercent ?? 0) > 20)     { score += 10; riskSignalSet.add("highTopHolderConcentration") }
     if ((holderData.top5Percent ?? 0) > 40)           { score += 25; riskSignalSet.add("whaleConcentration") }
     if ((holderData.top10Percent ?? 0) > 60)          { score += 30; riskSignalSet.add("extremeWhaleControl") }
 
-    // — Market health signals (DexScreener — always available) —
+    // -- Market health signals (DexScreener -- always available) --
     if (priceChange24h !== null) {
       const drop = Math.abs(Math.min(0, priceChange24h))
       if (drop >= 50)      { score += 30; riskSignalSet.add("severeDropDetected") }
