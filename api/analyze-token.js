@@ -423,7 +423,7 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     else if (top10Percent > 40) whaleRisk = "Moderate"
 
     console.log("PulseChain holder result:", { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length, scanned: addressSet.size })
-    return { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length }
+    return { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length, holders: holders.slice(0, 10) }
   } catch (e) {
     console.error("PulseChain holder reconstruction error", e)
     return null
@@ -462,6 +462,65 @@ async function fetchPulsechainLogsChunked(contractAddress, latestBlock, fromBloc
 /* MAIN HANDLER                                                        */
 /* ================================================================== */
 
+/* ------------------------------------------------------------------ */
+/* PULSECHAIN CONTRACT BASICS (via RPC)                               */
+/* Fetches: owner, totalSupply, decimals, bytecode size               */
+/* ------------------------------------------------------------------ */
+
+async function fetchPulsechainContractBasics(contractAddress) {
+  try {
+    const [ownerHex, totalSupplyHex, decimalsHex, bytecode] = await Promise.allSettled([
+      // owner() selector 0x8da5cb5b
+      rpcCall("eth_call", [{ to: contractAddress, data: "0x8da5cb5b" }, "latest"]),
+      // totalSupply() selector 0x18160ddd
+      rpcCall("eth_call", [{ to: contractAddress, data: "0x18160ddd" }, "latest"]),
+      // decimals() selector 0x313ce567
+      rpcCall("eth_call", [{ to: contractAddress, data: "0x313ce567" }, "latest"]),
+      // get bytecode to measure contract size (proxy detection)
+      rpcCall("eth_getCode", [contractAddress, "latest"]),
+    ])
+
+    // Owner address
+    let ownerAddress = null
+    let ownerRenounced = null
+    if (ownerHex.status === "fulfilled" && ownerHex.value && ownerHex.value !== "0x") {
+      const raw = ownerHex.value.replace(/^0x/, "").slice(-40)
+      if (raw.length === 40) {
+        ownerAddress = "0x" + raw
+        ownerRenounced = ownerAddress.toLowerCase() === ZERO_ADDRESS.toLowerCase()
+      }
+    }
+
+    // Total supply
+    let totalSupply = null
+    if (totalSupplyHex.status === "fulfilled" && totalSupplyHex.value) {
+      try { totalSupply = hexToBigInt(totalSupplyHex.value).toString() } catch {}
+    }
+
+    // Decimals
+    let decimals = null
+    if (decimalsHex.status === "fulfilled" && decimalsHex.value && decimalsHex.value !== "0x") {
+      try { decimals = parseInt(decimalsHex.value, 16) } catch {}
+    }
+
+    // Bytecode size -- very small (<100 bytes) usually means proxy/minimal contract
+    let isProxy = null
+    let bytecodeSize = null
+    if (bytecode.status === "fulfilled" && bytecode.value) {
+      bytecodeSize = (bytecode.value.length - 2) / 2  // hex chars -> bytes
+      // Standard EIP-1967 proxy has ~45 bytes of bytecode
+      if (bytecodeSize > 0 && bytecodeSize < 100) isProxy = true
+      else if (bytecodeSize >= 100) isProxy = false
+    }
+
+    console.log("PulseChain contract basics:", { ownerAddress, ownerRenounced, decimals, bytecodeSize, isProxy })
+    return { ownerAddress, ownerRenounced, decimals, totalSupply, bytecodeSize, isProxy }
+  } catch (e) {
+    console.error("fetchPulsechainContractBasics error:", e.message)
+    return null
+  }
+}
+
 module.exports = async function handler(req, res) {
 
   res.setHeader("Access-Control-Allow-Origin", "*")
@@ -494,7 +553,7 @@ module.exports = async function handler(req, res) {
     const moralisChain = chainMap[chain]?.moralis || null
     const goplusChain  = chainMap[chain]?.goplus  || null
 
-    const [dexResult, goplusResult, moralisResult, pulseMetaResult, pulseHolderResult, contractAgeResult] =
+    const [dexResult, goplusResult, moralisResult, pulseMetaResult, pulseHolderResult, contractAgeResult, pulseContractResult] =
       await Promise.all([
         fetchDexScreener(contractAddress, chain),
         fetchGoPlus(contractAddress, goplusChain),
@@ -502,6 +561,7 @@ module.exports = async function handler(req, res) {
         chain === "pulsechain" ? fetchPulsechainTokenMetadata(contractAddress)      : Promise.resolve(null),
         chain === "pulsechain" ? fetchPulsechainHolderDistribution(contractAddress) : Promise.resolve(null),
         chain !== "pulsechain" ? fetchContractAge(contractAddress, chain)           : Promise.resolve(null),
+        chain === "pulsechain" ? fetchPulsechainContractBasics(contractAddress)     : Promise.resolve(null),
       ])
 
     const pair = dexResult?.pair || null
@@ -534,6 +594,16 @@ module.exports = async function handler(req, res) {
     /* ---- Security + holder data ---- */
     const securityData = { ...DEFAULT_SECURITY_DATA, ...(goplusResult || {}) }
     const holderData   = { ...DEFAULT_HOLDER_DATA,   ...(moralisResult || pulseHolderResult || {}) }
+
+    // Backfill PulseChain RPC contract basics when GoPlus unavailable
+    if (chain === "pulsechain" && pulseContractResult) {
+      if (securityData.ownerRenounced == null && pulseContractResult.ownerRenounced != null)
+        securityData.ownerRenounced = pulseContractResult.ownerRenounced
+      if (securityData.ownerAddress == null && pulseContractResult.ownerAddress != null)
+        securityData.ownerAddress = pulseContractResult.ownerAddress
+      if (securityData.proxyContract == null && pulseContractResult.isProxy != null)
+        securityData.proxyContract = pulseContractResult.isProxy
+    }
 
     // Backfill holderCount from PulseChain RPC if GoPlus didn't return it
     if (securityData.holderCount == null && pulseHolderResult?.holderCount != null) {
@@ -622,6 +692,21 @@ module.exports = async function handler(req, res) {
     /* RESPONSE                                                          */
     /* ---------------------------------------------------------------- */
 
+    // Top holders list for PulseChain (individual addresses + percentages)
+    const topHolders = chain === "pulsechain" && pulseHolderResult?.holders
+      ? pulseHolderResult.holders.slice(0, 10).map(function(h) {
+          return { address: h.address, percentage: h.percentage }
+        })
+      : null
+
+    // PulseChain-specific fields for frontend
+    const pulseExtra = chain === "pulsechain" ? {
+      totalSupply:  pulseContractResult?.totalSupply  ?? null,
+      decimals:     pulseContractResult?.decimals     ?? null,
+      bytecodeSize: pulseContractResult?.bytecodeSize ?? null,
+      topHolders,
+    } : {}
+
     const responsePayload = {
       tokenName,
       tokenSymbol,
@@ -652,6 +737,7 @@ module.exports = async function handler(req, res) {
 
       ...securityData,
       ...holderData,
+      ...pulseExtra,
     }
 
     setCache(cacheKey, responsePayload)
