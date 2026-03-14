@@ -401,6 +401,7 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
         const r = results[j]
         if (r.status === "fulfilled" && r.value) {
           const bal = hexToBigInt(r.value)
+          // Store balance as string to avoid BigInt serialization issues
           if (bal > 0n) balanceEntries.push({ address: batch[j], balance: bal })
         }
       }
@@ -423,7 +424,15 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     else if (top10Percent > 40) whaleRisk = "Moderate"
 
     console.log("PulseChain holder result:", { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length, scanned: addressSet.size })
-    return { topHolderPercent, top5Percent, top10Percent, whaleRisk, holderCount: holders.length, holders: holders.slice(0, 10) }
+    // Return only serializable fields -- strip BigInt balance field
+    return {
+      topHolderPercent,
+      top5Percent,
+      top10Percent,
+      whaleRisk,
+      holderCount: holders.length,
+      holders: holders.slice(0, 10).map(h => ({ address: h.address, percentage: h.percentage }))
+    }
   } catch (e) {
     console.error("PulseChain holder reconstruction error", e)
     return null
