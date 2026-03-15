@@ -552,7 +552,6 @@ async function generateAIExplanation(data) {
     const openai = getOpenAI()
     if (!openai) return null
 
-    // Build a compact subset of the payload -- no need to send everything
     const subset = {
       tokenName:        data.tokenName,
       tokenSymbol:      data.tokenSymbol,
@@ -587,15 +586,33 @@ async function generateAIExplanation(data) {
     const response = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0.2,
-      max_tokens: 200,
+      max_tokens: 280,
       messages: [
         {
           role: "system",
-          content: "You are a blockchain security analyst. Explain smart contract risk analysis results to beginner crypto users. Use simple, clear language. Never give financial advice. Do not invent information not present in the data. Keep your response to 80-150 words. Focus on: contract safety, liquidity health, holder concentration, and developer permissions.",
+          content: `You are a blockchain security analyst.
+Explain smart contract analysis results to beginner crypto users.
+Use clear simple language.
+Never give financial advice.
+Never recommend buying or selling.
+Only explain the provided data.
+
+Return the analysis using EXACTLY this structure with these exact headings:
+
+Summary
+[One or two sentences giving a high-level view of the contract risk.]
+
+Strengths
+[Bullet points starting with - describing positive signals. 2-4 bullets.]
+
+Risks
+[Bullet points starting with - describing concerns. 2-4 bullets. If no risks, write - No significant risks detected.]
+
+Keep the total response to 120-160 words. Do not add any other headings or sections.`,
         },
         {
           role: "user",
-          content: "Explain this token analysis:\n" + JSON.stringify(subset, null, 2),
+          content: "Analyze this token:\n" + JSON.stringify(subset, null, 2),
         },
       ],
     })
