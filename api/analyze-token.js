@@ -1,4 +1,17 @@
 const PULSECHAIN_RPC = "https://rpc.pulsechain.com"
+
+/* ------------------------------------------------------------------ */
+/* OPENAI CLIENT                                                       */
+/* ------------------------------------------------------------------ */
+// Lazy-initialize so missing key doesn't crash non-AI paths
+let _openai = null
+function getOpenAI() {
+  if (!_openai && process.env.OPENAI_API_KEY) {
+    const { OpenAI } = require("openai")
+    _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  }
+  return _openai
+}
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -530,6 +543,71 @@ async function fetchPulsechainContractBasics(contractAddress) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* AI EXPLANATION GENERATOR                                           */
+/* ------------------------------------------------------------------ */
+
+async function generateAIExplanation(data) {
+  try {
+    const openai = getOpenAI()
+    if (!openai) return null
+
+    // Build a compact subset of the payload -- no need to send everything
+    const subset = {
+      tokenName:        data.tokenName,
+      tokenSymbol:      data.tokenSymbol,
+      chain:            data.chain,
+      riskScore:        data.riskScore,
+      riskLevel:        data.riskLevel,
+      securityGrade:    data.securityGrade,
+      riskSignals:      data.riskSignals,
+      liquidityUSD:     data.liquidityUSD,
+      liqRatio:         data.liqRatio,
+      marketCap:        data.marketCap,
+      volume24h:        data.volume24h,
+      sellPressure:     data.sellPressure,
+      priceChange24h:   data.priceChange24h,
+      contractAgeDays:  data.contractAgeDays,
+      honeypot:         data.honeypot,
+      mintable:         data.mintable,
+      ownerRenounced:   data.ownerRenounced,
+      hiddenOwner:      data.hiddenOwner,
+      selfDestruct:     data.selfDestruct,
+      blacklist:        data.blacklist,
+      transferPausable: data.transferPausable,
+      proxyContract:    data.proxyContract,
+      topHolderPercent: data.topHolderPercent,
+      top5Percent:      data.top5Percent,
+      top10Percent:     data.top10Percent,
+      whaleRisk:        data.whaleRisk,
+      buyTax:           data.buyTax,
+      sellTax:          data.sellTax,
+    }
+
+    const response = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      temperature: 0.2,
+      max_tokens: 200,
+      messages: [
+        {
+          role: "system",
+          content: "You are a blockchain security analyst. Explain smart contract risk analysis results to beginner crypto users. Use simple, clear language. Never give financial advice. Do not invent information not present in the data. Keep your response to 80-150 words. Focus on: contract safety, liquidity health, holder concentration, and developer permissions.",
+        },
+        {
+          role: "user",
+          content: "Explain this token analysis:\n" + JSON.stringify(subset, null, 2),
+        },
+      ],
+    })
+
+    const text = response.choices?.[0]?.message?.content?.trim()
+    return text || null
+  } catch (e) {
+    console.error("AI explanation error:", e.message)
+    return null
+  }
+}
+
 module.exports = async function handler(req, res) {
 
   res.setHeader("Access-Control-Allow-Origin", "*")
@@ -748,6 +826,10 @@ module.exports = async function handler(req, res) {
       ...holderData,
       ...pulseExtra,
     }
+
+    // -- AI explanation (non-blocking -- failure returns null, never breaks the response)
+    const aiExplanation = await generateAIExplanation(responsePayload)
+    responsePayload.aiExplanation = aiExplanation
 
     setCache(cacheKey, responsePayload)
     return res.status(200).json(responsePayload)
