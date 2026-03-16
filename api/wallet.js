@@ -70,8 +70,8 @@ async function fetchWalletBalance(walletAddress, chain) {
 /* ------------------------------------------------------------------ */
 async function fetchWalletAge(walletAddress, chain) {
   try {
-    var moralisChain = chain === "pulsechain" ? null : "eth"
-    if (!moralisChain || !process.env.MORALIS_API_KEY) return null
+    var moralisChain = chain === "pulsechain" ? "0x171" : "0x1"
+    if (!process.env.MORALIS_API_KEY) return null
 
     var url = "https://deep-index.moralis.io/api/v2.2/" + walletAddress
       + "/transactions?chain=" + moralisChain + "&limit=1&order=ASC"
@@ -97,7 +97,7 @@ async function fetchWalletAge(walletAddress, chain) {
 async function fetchWalletTokens(walletAddress, chain) {
   try {
     if (!process.env.MORALIS_API_KEY) return []
-    var moralisChain = chain === "pulsechain" ? "pulse" : "eth"
+    var moralisChain = chain === "pulsechain" ? "0x171" : "0x1"
     var url = "https://deep-index.moralis.io/api/v2.2/"
       + walletAddress + "/erc20?chain=" + moralisChain + "&limit=25"
     var res = await fetch(url, {
@@ -141,7 +141,7 @@ async function fetchWalletTokens(walletAddress, chain) {
 async function fetchWalletTransactions(walletAddress, chain) {
   try {
     if (!process.env.MORALIS_API_KEY) return []
-    var moralisChain = chain === "pulsechain" ? "pulse" : "eth"
+    var moralisChain = chain === "pulsechain" ? "0x171" : "0x1"
     var url = "https://deep-index.moralis.io/api/v2.2/"
       + walletAddress + "/transactions?chain=" + moralisChain + "&limit=20&order=DESC"
     var res = await fetch(url, {
