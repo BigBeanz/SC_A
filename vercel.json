@@ -5,6 +5,9 @@
     },
     "api/contract-question.js": {
       "maxDuration": 15
+    },
+    "api/wallet.js": {
+      "maxDuration": 30
     }
   }
 }
