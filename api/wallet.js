@@ -293,6 +293,7 @@ async function fetchWalletTransactions(walletAddress, chain) {
     })
   } catch (e) {
     console.error("fetchWalletTransactions error:", e.message)
+    return []
   }
 }
 
@@ -390,7 +391,7 @@ module.exports = async function handler(req, res) {
         allItems.push({ symbol: t.symbol, usdValue: t.usdValue, isNative: false, address: t.address })
       }
     })
-    allItems.sort(function(a, b) { return b.usdValue - a.usdValue })
+    allItems.sort(function(a, b) { return (b.usdValue || 0) - (a.usdValue || 0) })
     var totalVal = allItems.reduce(function(s, i) { return s + i.usdValue }, 0)
     var allocation = allItems.slice(0, 10).map(function(item) {
       return {
