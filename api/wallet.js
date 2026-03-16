@@ -135,100 +135,80 @@ async function fetchTokenPrice(tokenAddress, chain) {
   } catch { return null }
 }
 
+// -- Known major PulseChain tokens (address, symbol, name, decimals)
+const PULSECHAIN_KNOWN_TOKENS = [
+  { address: "0x2b591e99afe9f32eaa6214f7b7629768c40eeb39", symbol: "HEX",   name: "HEX",               decimals: 8  },
+  { address: "0x95b303987a60c71504d99aa1b13b4da07b0790ab", symbol: "PLSX",  name: "PulseX",            decimals: 18 },
+  { address: "0x2fa878ab3f87cc1c9737fc071108f904c0b0c95d", symbol: "INC",   name: "Incentive",          decimals: 18 },
+  { address: "0xa1077a294dde1b09bb078844df40758a5d0f9a27", symbol: "WPLS",  name: "Wrapped Pulse",      decimals: 18 },
+  { address: "0x15d38573d2feeb82e7ad5187ab8c1d52810b1f07", symbol: "USDC",  name: "USD Coin",           decimals: 6  },
+  { address: "0x0cb6f5a34ad42ec934882a05265a7d5f59b51a2f", symbol: "USDT",  name: "Tether USD",         decimals: 6  },
+  { address: "0xefD766cCb38EaF1dfd701853BFCe31359239F305", symbol: "DAI",   name: "Dai Stablecoin",     decimals: 18 },
+  { address: "0x02DcdD04e3F455D838cd1249292C58f3B79e3C3C", symbol: "WETH",  name: "Wrapped Ethereum",   decimals: 18 },
+  { address: "0x1d91E3F77271ed069618b4BA06d19821BC2ed8b0", symbol: "WBTC",  name: "Wrapped Bitcoin",    decimals: 8  },
+  { address: "0x57fde0a71132198BBeC939B98976993d8D89D225", symbol: "eHEX",  name: "HEX on Ethereum",    decimals: 8  },
+  { address: "0xb17D901469B9208B17d916112988A3FeD19b5cA1", symbol: "WBNB",  name: "Wrapped BNB",        decimals: 18 },
+  { address: "0x5EE84583f67D5EcEa5420dBb42b462896E7f8D4", symbol: "PLSP",  name: "PulsePad",           decimals: 18 },
+  { address: "0x347a96a5BD06D2E15199b032F46fB724d6c73047", symbol: "BEAM",  name: "Beam",               decimals: 18 },
+  { address: "0xE99d6D7f7F18Cb1c68cec43A0e03Ee92cfE08bca", symbol: "9INCH", name: "9inch",              decimals: 18 },
+  { address: "0xF0ED0000000EE49B6B7bd2cfA47b0A93992A7c8c", symbol: "LOAN", name: "Loan Token",         decimals: 18 },
+]
+
 async function fetchWalletTokensRPC(walletAddress, chain) {
-  // Step 1: Scan recent transfer logs where wallet is recipient
+  // For PulseChain: check balanceOf for known major tokens in parallel
+  // eth_getLogs without contract address is rejected by the RPC node
   var rpc = chain === "pulsechain" ? PULSECHAIN_RPC : ETHEREUM_RPC
-  var DEADLINE = Date.now() + 20_000
+  var knownTokens = chain === "pulsechain" ? PULSECHAIN_KNOWN_TOKENS : []
+  if (!knownTokens.length) return []
 
   try {
-    var latestHex = await rpcCall(rpc, "eth_blockNumber", [])
-    var latest = parseInt(latestHex, 16)
-    if (isNaN(latest)) return []
-
-    // Pad wallet address to 32 bytes for topic matching
-    var paddedAddr = "0x" + "0".repeat(24) + walletAddress.slice(2).toLowerCase()
-
-    // Scan last 200k blocks in chunks of 10k
-    var WINDOW = 200_000
-    var CHUNK  = 10_000
-    var tokenSet = new Set()
-    var from = Math.max(0, latest - WINDOW)
-    var cur = from
-
-    while (cur < latest && Date.now() < DEADLINE) {
-      var to = Math.min(cur + CHUNK - 1, latest)
-      try {
-        var logs = await rpcCall(rpc, "eth_getLogs", [{
-          fromBlock: "0x" + cur.toString(16),
-          toBlock:   "0x" + to.toString(16),
-          topics:    [TRANSFER_TOPIC, null, paddedAddr],  // transfers TO wallet
-        }])
-        if (Array.isArray(logs)) {
-          logs.forEach(function(log) {
-            if (log.address) tokenSet.add(log.address.toLowerCase())
-          })
-        }
-      } catch (e) {
-        console.error("RPC log chunk error:", e.message)
-      }
-      cur = to + 1
-      if (tokenSet.size >= 30) break  // enough tokens found
+    var DEADLINE = Date.now() + 15_000
+    var balData = function(addr) {
+      return "0x70a08231" + walletAddress.slice(2).toLowerCase().padStart(64, "0")
     }
 
-    console.log("RPC wallet scan: found", tokenSet.size, "token addresses")
-    if (!tokenSet.size) return []
-
-    // Step 2: For each token, get balance + metadata in parallel
-    var tokenAddresses = [...tokenSet]
-    var results = await Promise.allSettled(tokenAddresses.map(async function(tokenAddr) {
+    // Check all known tokens in parallel
+    var results = await Promise.allSettled(knownTokens.map(async function(t) {
       try {
-        var balData  = "0x70a08231" + walletAddress.slice(2).toLowerCase().padStart(64, "0")
-        var [balHex, nameHex, symbolHex, decHex] = await Promise.all([
-          rpcCall(rpc, "eth_call", [{ to: tokenAddr, data: balData }, "latest"]),
-          rpcCall(rpc, "eth_call", [{ to: tokenAddr, data: "0x06fdde03" }, "latest"]),
-          rpcCall(rpc, "eth_call", [{ to: tokenAddr, data: "0x95d89b41" }, "latest"]),
-          rpcCall(rpc, "eth_call", [{ to: tokenAddr, data: "0x313ce567" }, "latest"]),
-        ])
-        var decimals = decHex && decHex !== "0x" ? parseInt(decHex, 16) : 18
-        if (isNaN(decimals) || decimals > 36) decimals = 18
+        var data = "0x70a08231" + walletAddress.slice(2).toLowerCase().padStart(64, "0")
+        var balHex = await rpcCall(rpc, "eth_call", [{ to: t.address, data }, "latest"])
         var rawBal = hexToBigInt(balHex)
         if (rawBal <= 0n) return null
-        var balance = Number(rawBal) / Math.pow(10, decimals)
+        var balance = Number(rawBal) / Math.pow(10, t.decimals)
         if (balance <= 0) return null
-        var symbol = decodeAbiString(symbolHex) || tokenAddr.slice(0, 6)
-        var name   = decodeAbiString(nameHex)   || symbol
-        return { address: tokenAddr, name, symbol, decimals, balance, rawBal: rawBal.toString() }
+        return { ...t, balance, rawBal: rawBal.toString() }
       } catch { return null }
     }))
 
-    var tokens = results
+    var held = results
       .filter(function(r) { return r.status === "fulfilled" && r.value !== null })
       .map(function(r) { return r.value })
 
-    // Step 3: Price the top tokens via DexScreener (parallel, up to 8)
-    var toPrice = tokens.slice(0, 8)
-    var prices  = await Promise.allSettled(toPrice.map(function(t) {
+    if (!held.length) return []
+    console.log("PulseChain: wallet holds", held.length, "known tokens")
+
+    // Price held tokens via DexScreener
+    var priced = await Promise.allSettled(held.map(function(t) {
       return fetchTokenPrice(t.address, chain)
     }))
 
-    return tokens.map(function(t, i) {
-      var price    = i < prices.length && prices[i].status === "fulfilled" ? prices[i].value : null
+    return held.map(function(t, i) {
+      var price    = priced[i]?.status === "fulfilled" ? priced[i].value : null
       var usdValue = price !== null ? t.balance * price : null
       return {
-        address:   t.address,
-        name:      t.name,
-        symbol:    t.symbol,
-        decimals:  t.decimals,
-        balance:   t.balance,
+        address:      t.address,
+        name:         t.name,
+        symbol:       t.symbol,
+        decimals:     t.decimals,
+        balance:      t.balance,
         usdValue,
-        usdPrice:  price,
-        logo:      null,
-        thumbnail: "https://dd.dexscreener.com/ds-data/tokens/" + chain + "/" + t.address + ".png?size=lg",
-        verified:  false,
+        usdPrice:     price,
+        logo:         null,
+        thumbnail:    "https://dd.dexscreener.com/ds-data/tokens/pulsechain/" + t.address.toLowerCase() + ".png?size=lg",
+        verified:     true,
         possibleSpam: false,
       }
-    }).filter(function(t) { return t.balance > 0 })
-      .sort(function(a, b) { return (b.usdValue || 0) - (a.usdValue || 0) })
+    }).sort(function(a, b) { return (b.usdValue || 0) - (a.usdValue || 0) })
 
   } catch (e) {
     console.error("fetchWalletTokensRPC error:", e.message)
@@ -236,23 +216,28 @@ async function fetchWalletTokensRPC(walletAddress, chain) {
   }
 }
 
+async function fetchWalletTransactionsRPC(walletAddress, chain) {
+  // Get recent txs via eth_getTransactionCount only gives nonce, not history
+  // For PulseChain we can't reliably get tx history without an indexer
+  // Return empty -- the tx count from nonce is shown in the overview
+  return []
+}
+
 async function fetchWalletTokens(walletAddress, chain) {
-  // PulseChain: use RPC log scan (Moralis doesn't support PulseChain)
   if (chain === "pulsechain") {
     return fetchWalletTokensRPC(walletAddress, chain)
   }
-  // Ethereum: try Moralis first, fall back to RPC
+  // Ethereum: Moralis first, fall back to empty (RPC eth_getLogs also blocked on Ethereum RPC)
   try {
-    if (!process.env.MORALIS_API_KEY) return fetchWalletTokensRPC(walletAddress, chain)
+    if (!process.env.MORALIS_API_KEY) return []
     var url = "https://deep-index.moralis.io/api/v2.2/"
       + walletAddress + "/erc20?chain=0x1&limit=25"
     var res = await fetch(url, {
       headers: { "X-API-Key": process.env.MORALIS_API_KEY }
     })
-    if (!res.ok) return fetchWalletTokensRPC(walletAddress, chain)
+    if (!res.ok) return []
     var json = await res.json()
     var raw = Array.isArray(json?.result) ? json.result : []
-    if (!raw.length) return fetchWalletTokensRPC(walletAddress, chain)
 
     return raw.map(function(t) {
       var decimals = safeInt(t.decimals) || 18
@@ -272,100 +257,25 @@ async function fetchWalletTokens(walletAddress, chain) {
       }
     }).filter(function(t) { return !t.possibleSpam && t.balance > 0 })
   } catch (e) {
-    console.error("fetchWalletTokens Moralis error:", e.message)
-    return fetchWalletTokensRPC(walletAddress, chain)
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* HELPER: Recent transactions                                        */
-/* Moralis for Ethereum, RPC transfer log scan for PulseChain         */
-/* ------------------------------------------------------------------ */
-async function fetchWalletTransactionsRPC(walletAddress, chain) {
-  try {
-    var rpc = chain === "pulsechain" ? PULSECHAIN_RPC : ETHEREUM_RPC
-    var latestHex = await rpcCall(rpc, "eth_blockNumber", [])
-    var latest = parseInt(latestHex, 16)
-    if (isNaN(latest)) return []
-
-    var paddedFrom = "0x" + "0".repeat(24) + walletAddress.slice(2).toLowerCase()
-    var paddedTo   = "0x" + "0".repeat(24) + walletAddress.slice(2).toLowerCase()
-    var WINDOW = 50_000, CHUNK = 10_000
-    var fromBlock = Math.max(0, latest - WINDOW)
-    var txMap = {}
-
-    // Scan for native transfers (sent)
-    var [logsFrom, logsTo] = await Promise.allSettled([
-      rpcCall(rpc, "eth_getLogs", [{
-        fromBlock: "0x" + fromBlock.toString(16),
-        toBlock:   "0x" + latest.toString(16),
-        topics:    [TRANSFER_TOPIC, paddedFrom],
-      }]),
-      rpcCall(rpc, "eth_getLogs", [{
-        fromBlock: "0x" + fromBlock.toString(16),
-        toBlock:   "0x" + latest.toString(16),
-        topics:    [TRANSFER_TOPIC, null, paddedTo],
-      }]),
-    ])
-
-    var allLogs = []
-    if (logsFrom.status === "fulfilled" && Array.isArray(logsFrom.value)) allLogs = allLogs.concat(logsFrom.value)
-    if (logsTo.status === "fulfilled"   && Array.isArray(logsTo.value))   allLogs = allLogs.concat(logsTo.value)
-
-    // Get unique tx hashes (latest 15)
-    var seenTx = {}
-    var txHashes = []
-    allLogs.sort(function(a, b) { return parseInt(b.blockNumber,16) - parseInt(a.blockNumber,16) })
-    allLogs.forEach(function(log) {
-      if (log.transactionHash && !seenTx[log.transactionHash]) {
-        seenTx[log.transactionHash] = true
-        txHashes.push({ hash: log.transactionHash, blockNum: parseInt(log.blockNumber, 16) })
-      }
-    })
-    txHashes = txHashes.slice(0, 15)
-
-    // Fetch tx details
-    var txDetails = await Promise.allSettled(txHashes.map(function(t) {
-      return rpcCall(rpc, "eth_getTransactionByHash", [t.hash])
-    }))
-
-    return txDetails
-      .filter(function(r) { return r.status === "fulfilled" && r.value })
-      .map(function(r) {
-        var tx = r.value
-        var value = Number(hexToBigInt(tx.value || "0x0")) / 1e18
-        var isOut = tx.from?.toLowerCase() === walletAddress.toLowerCase()
-        return {
-          hash:      tx.hash,
-          timestamp: null,  // RPC tx doesn't include timestamp without block lookup
-          from:      tx.from,
-          to:        tx.to,
-          value,
-          direction: isOut ? "out" : "in",
-          blockNumber: parseInt(tx.blockNumber, 16),
-        }
-      })
-  } catch (e) {
-    console.error("fetchWalletTransactionsRPC error:", e.message)
+    console.error("fetchWalletTokens error:", e.message)
     return []
   }
 }
 
+/* ------------------------------------------------------------------ */
+
 async function fetchWalletTransactions(walletAddress, chain) {
   if (chain === "pulsechain") {
-    return fetchWalletTransactionsRPC(walletAddress, chain)
+    return []  // PulseChain tx history requires an indexer
   }
   try {
-    if (!process.env.MORALIS_API_KEY) return fetchWalletTransactionsRPC(walletAddress, chain)
     var url = "https://deep-index.moralis.io/api/v2.2/"
       + walletAddress + "/transactions?chain=0x1&limit=20&order=DESC"
     var res = await fetch(url, {
       headers: { "X-API-Key": process.env.MORALIS_API_KEY }
     })
-    if (!res.ok) return fetchWalletTransactionsRPC(walletAddress, chain)
     var json = await res.json()
     var raw = Array.isArray(json?.result) ? json.result : []
-    if (!raw.length) return fetchWalletTransactionsRPC(walletAddress, chain)
 
     return raw.map(function(tx) {
       var value = parseFloat(tx.value || "0") / 1e18
@@ -383,7 +293,6 @@ async function fetchWalletTransactions(walletAddress, chain) {
     })
   } catch (e) {
     console.error("fetchWalletTransactions error:", e.message)
-    return fetchWalletTransactionsRPC(walletAddress, chain)
   }
 }
 
