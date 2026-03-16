@@ -336,6 +336,10 @@ async function fetchPulsechainTokenMetadata(contractAddress) {
 /* ------------------------------------------------------------------ */
 
 async function fetchPulsechainHolderDistribution(contractAddress) {
+  // Hard time budget -- must finish well before the 60s Vercel timeout.
+  // The AI call, DexScreener, GoPlus etc also need time, so cap at 35s.
+  const DEADLINE = Date.now() + 35_000
+
   try {
     // Step 1: Get total supply
     const totalSupplyHex = await rpcCall("eth_call", [
@@ -354,13 +358,14 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
     if (Number.isNaN(latestBlock)) { console.log("PulseChain: latestBlock is NaN, aborting"); return null }
 
     const CHUNK = 2_000          // small enough that even PLSX won't overflow RPC result limit
-    const MIN_ADDRESSES = 200    // keep expanding until we have at least this many candidates
-    const MAX_ADDRESSES = 800    // cap to keep balanceOf phase fast
-    const WINDOWS = [10_000, 50_000, 200_000, 500_000, 2_000_000]
+    const MIN_ADDRESSES = 50     // reduced -- low-volume tokens won't have 200 recent traders
+    const MAX_ADDRESSES = 400    // cap to keep balanceOf phase fast
+    const WINDOWS = [10_000, 50_000, 150_000, 300_000]  // removed 2M window -- too slow for timeout budget
     const addressSet = new Set()
 
     for (let wi = 0; wi < WINDOWS.length; wi++) {
       if (addressSet.size >= MIN_ADDRESSES) break
+      if (Date.now() >= DEADLINE) { console.log("PulseChain: deadline hit during window scan"); break }
       const window = WINDOWS[wi]
       const fromBlock = Math.max(0, latestBlock - window)
       let cur = fromBlock
@@ -368,6 +373,7 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
       const MAX_CHUNKS = 150
 
       while (cur < latestBlock && addressSet.size < MAX_ADDRESSES && chunksThisWindow < MAX_CHUNKS) {
+        if (Date.now() >= DEADLINE) { console.log("PulseChain: deadline hit mid-chunk"); break }
         const toBlock = Math.min(cur + CHUNK - 1, latestBlock)
         try {
           const logs = await rpcCall("eth_getLogs", [{
@@ -396,6 +402,12 @@ async function fetchPulsechainHolderDistribution(contractAddress) {
 
     console.log("PulseChain: total discovered addresses:", addressSet.size)
     if (addressSet.size === 0) { console.log("PulseChain: no addresses found in any window"); return null }
+
+    // Abort balanceOf phase if we're already close to deadline
+    if (Date.now() >= DEADLINE - 5_000) {
+      console.log("PulseChain: skipping balanceOf phase -- deadline too close")
+      return null
+    }
 
     // Step 3: Query live balances in batches of 30
     const addresses = [...addressSet]
