@@ -1,13 +1,8 @@
 {
   "functions": {
-    "api/analyze-token.js": {
-      "maxDuration": 60
-    },
-    "api/contract-question.js": {
-      "maxDuration": 15
-    },
-    "api/wallet.js": {
-      "maxDuration": 30
-    }
+    "api/analyze-token.js": { "maxDuration": 60 },
+    "api/contract-question.js": { "maxDuration": 15 },
+    "api/wallet.js": { "maxDuration": 30 },
+    "api/charts.js": { "maxDuration": 20 }
   }
 }
